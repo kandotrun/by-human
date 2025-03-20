@@ -12,13 +12,28 @@ import re
 import json
 import datetime
 import subprocess
+import warnings
+import io
+import sys
+from contextlib import redirect_stderr, redirect_stdout
 from typing import List, Dict, Any, Optional, Tuple
+
+# LangChainの非推奨警告を抑制
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*The class.*LLMChain.*was deprecated.*")
+warnings.filterwarnings("ignore", message=".*The method.*Chain.run.*was deprecated.*")
 
 from langchain_ollama import OllamaLLM
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain.tools import BaseTool
 from langchain.callbacks import StdOutCallbackHandler
+from rich.console import Console
+from rich.panel import Panel
+from rich.markdown import Markdown
+from rich.table import Table
+from rich.prompt import Prompt, Confirm
+from rich.syntax import Syntax
 
 class MarkdownFileTool(BaseTool):
     """Markdownファイルを操作するためのツールクラス"""
@@ -474,6 +489,20 @@ class PersonalAI:
         self.feedback_analyzer = FeedbackAnalyzer(
             OllamaLLM(model=ollama_model, temperature=0.2)
         )
+        
+        # コマンド処理ハンドラー
+        self.command_handlers = {
+            "/help": self._handle_help,
+            "/remember": self._handle_remember,
+            "/forget": self._handle_forget,
+            "/profile": self._handle_profile,
+            "/settings": self._handle_settings,
+            "/history": self._handle_history,
+            "/clear": self._handle_clear,
+        }
+        
+        # 記憶する情報の候補
+        self.memory_candidate = None
     
     def _check_ollama(self):
         """Ollamaが利用可能か確認し、必要に応じてモデルをプルする"""
@@ -562,6 +591,164 @@ class PersonalAI:
         """満足度傾向を取得"""
         return self.memory.get_satisfaction_trends()
 
+    def process_command(self, command: str) -> Optional[str]:
+        """
+        コマンドを処理する
+        
+        Args:
+            command: ユーザーが入力したコマンド
+            
+        Returns:
+            コマンドの実行結果、コマンドでない場合はNone
+        """
+        if not command.startswith("/"):
+            return None
+            
+        parts = command.split()
+        cmd = parts[0].lower()
+        args = parts[1:] if len(parts) > 1 else []
+        
+        if cmd in self.command_handlers:
+            return self.command_handlers[cmd](args)
+        
+        return f"不明なコマンド: {cmd}\n/help で利用可能なコマンドを確認できます。"
+    
+    def _handle_help(self, args: List[str]) -> str:
+        """ヘルプコマンドを処理"""
+        return """利用可能なコマンド:
+/help - このヘルプを表示
+/remember <キー> <値> - 情報を記憶する (例: /remember 誕生日 4月1日)
+/forget <キー> - 記憶した情報を忘れる
+/profile - 記憶している情報を表示
+/settings - 設定を表示/変更
+/history [数] - 過去の会話履歴を表示
+/clear - 現在の会話履歴をクリア
+"""
+    
+    def _handle_remember(self, args: List[str]) -> str:
+        """記憶コマンドを処理"""
+        if len(args) < 2:
+            return "使用法: /remember <キー> <値>"
+        
+        key = args[0]
+        value = " ".join(args[1:])
+        
+        self.save_profile_info(key, value)
+        return f"「{key}: {value}」を記憶しました。"
+    
+    def _handle_forget(self, args: List[str]) -> str:
+        """忘却コマンドを処理"""
+        if len(args) < 1:
+            return "使用法: /forget <キー>"
+        
+        key = args[0]
+        profile_content = self.get_profile()
+        
+        # 既存のプロファイルから該当キーを削除
+        lines = profile_content.split("\n")
+        found = False
+        
+        for i, line in enumerate(lines):
+            if line.startswith(f"- **{key}**:"):
+                lines.pop(i)
+                found = True
+                break
+        
+        if found:
+            self.file_tool._run("write", self.memory.profile_file, "\n".join(lines))
+            return f"「{key}」を忘れました。"
+        else:
+            return f"「{key}」は記憶されていません。"
+    
+    def _handle_profile(self, args: List[str]) -> str:
+        """プロファイル表示コマンドを処理"""
+        profile = self.get_profile()
+        
+        if not profile or profile == "# ユーザープロファイル\n\n":
+            return "プロファイル情報はまだ記録されていません。"
+        
+        return profile
+    
+    def _handle_settings(self, args: List[str]) -> str:
+        """設定コマンドを処理"""
+        if not args:
+            preferences = self.get_preferences()
+            if not preferences or preferences == "# ユーザー設定\n\n":
+                return "設定情報はまだ記録されていません。"
+            return preferences
+        
+        # 設定の変更処理は今後実装
+        return "設定の変更機能は準備中です。"
+    
+    def _handle_history(self, args: List[str]) -> str:
+        """履歴表示コマンドを処理"""
+        n = 5  # デフォルト
+        
+        if args and args[0].isdigit():
+            n = int(args[0])
+        
+        history = self.get_recent_conversations(n)
+        
+        if not history:
+            return "会話履歴はまだありません。"
+        
+        return history
+    
+    def _handle_clear(self, args: List[str]) -> str:
+        """履歴クリアコマンドを処理"""
+        self.conversation_history = []
+        self.current_conversation_id = None
+        return "現在の会話履歴をクリアしました。"
+    
+    def detect_memorizable_info(self, text: str) -> Optional[Dict[str, str]]:
+        """
+        テキストから記憶すべき情報を検出する
+        
+        Args:
+            text: ユーザーの入力テキスト
+            
+        Returns:
+            記憶すべき情報（キーと値のペア）またはNone
+        """
+        # 情報抽出用のプロンプト作成
+        prompt = PromptTemplate(
+            input_variables=["text"],
+            template="""
+ユーザーの発言から記憶すべき重要な情報を抽出してください。
+ユーザーが「〜は〜だ」「〜を〜に置いた」など、事実や好み、位置情報などを述べている場合は、それを記憶すべき情報として抽出してください。
+単なる質問や会話の一部だけの場合は何も抽出しないでください。
+
+## ユーザーの発言
+{text}
+
+JSONで以下の形式で応答してください：
+{{"should_memorize": true/false, "key": "抽出したキー", "value": "抽出した値"}}
+
+例：
+「私の誕生日は7月7日だよ」→ {{"should_memorize": true, "key": "誕生日", "value": "7月7日"}}
+「HHKBはデスクの左側に置いてある」→ {{"should_memorize": true, "key": "HHKB", "value": "デスクの左側に置いてある"}}
+「今日の天気はどう？」→ {{"should_memorize": false, "key": "", "value": ""}}
+"""
+        )
+        
+        # LLMチェーンで情報を抽出
+        chain = LLMChain(llm=self.llm, prompt=prompt)
+        result = chain.run(text=text)
+        
+        try:
+            # 結果をJSON形式で解析
+            json_str = re.search(r'\{.*\}', result, re.DOTALL)
+            if json_str:
+                data = json.loads(json_str.group(0))
+                if data.get("should_memorize", False):
+                    return {
+                        "key": data.get("key", ""),
+                        "value": data.get("value", "")
+                    }
+            return None
+        except:
+            return None
+    
     def generate_response(self, human_input: str) -> str:
         """
         ユーザーの入力に基づいてAIの応答を生成
@@ -572,6 +759,23 @@ class PersonalAI:
         Returns:
             AIの応答
         """
+        # 記憶候補の確認応答処理
+        if self.memory_candidate is not None:
+            if human_input.lower() in ["y", "yes", "はい", "うん", "そう"]:
+                key = self.memory_candidate["key"]
+                value = self.memory_candidate["value"]
+                self.save_profile_info(key, value)
+                self.memory_candidate = None
+                return f"「{key}: {value}」を記憶しました。"
+            elif human_input.lower() in ["n", "no", "いいえ", "違う", "ちがう"]:
+                self.memory_candidate = None
+                return "わかりました。記憶しません。"
+        
+        # コマンド処理
+        command_result = self.process_command(human_input)
+        if command_result is not None:
+            return command_result
+        
         # 会話履歴を更新
         self.conversation_history.append({"role": "user", "content": human_input})
         
@@ -622,6 +826,9 @@ class PersonalAI:
             recent_conversations=recent_conversations
         )
         
+        # 記憶すべき情報があるか検出
+        memorizable_info = self.detect_memorizable_info(human_input)
+        
         # 会話IDを生成または更新
         if not self.current_conversation_id:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -634,6 +841,11 @@ class PersonalAI:
         self.conversation_history.append({"role": "AI", "content": response})
         self.last_response = response
         
+        # 記憶すべき情報があれば候補として保存（次の入力でy/nを確認する）
+        if memorizable_info:
+            self.memory_candidate = memorizable_info
+            return f"{response}\n\n「{memorizable_info['key']}: {memorizable_info['value']}」を記憶しておきますか？(y/n)"
+        
         return response
 
 if __name__ == "__main__":
@@ -645,31 +857,62 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="llama3.3", help="使用するOllamaモデル")
     args = parser.parse_args()
     
+    # リッチコンソールの初期化
+    console = Console()
+    
     # PersonalAIの初期化
     ai = PersonalAI(user_id=args.user_id, ollama_model=args.model)
     
-    print(f"=== パーソナルAIアシスタント - ユーザー: {args.user_id} ===")
-    print("終了するには 'exit' または 'quit' と入力してください。")
+    # スプラッシュ画面表示
+    console.print(Panel.fit(
+        f"[bold cyan]パーソナルAIアシスタント[/bold cyan] - [yellow]{args.user_id}[/yellow]",
+        subtitle="[dim]llama3.3[/dim]"
+    ))
+    
+    console.print("\n[dim]コマンド一覧を表示するには [bold]/help[/bold] と入力してください。[/dim]")
+    console.print("[dim]終了するには [bold]exit[/bold] または [bold]quit[/bold] と入力してください。[/dim]\n")
     
     # 対話ループ
     while True:
         try:
             # ユーザー入力の取得
-            user_input = input("\nあなた: ")
+            user_input = Prompt.ask("\n[bold green]あなた[/bold green]")
             
             # 終了コマンドのチェック
             if user_input.lower() in ["exit", "quit", "終了"]:
-                print("さようなら！")
+                console.print("[bold yellow]さようなら！[/bold yellow]")
                 break
             
-            # AIの応答を生成
-            response = ai.generate_response(user_input)
+            # AIの応答を生成（コマンド処理も含む）
+            console.print("[dim]処理中...[/dim]")
+            
+            # 警告出力を抑制
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                response = ai.generate_response(user_input)
             
             # 応答を表示
-            print(f"\nAI: {response}")
+            if user_input.startswith("/") and not ai.memory_candidate:
+                # コマンド結果の表示
+                if response.startswith("# "):
+                    # Markdown表示
+                    console.print(Markdown(response))
+                else:
+                    # 通常テキスト表示
+                    console.print(Panel(response, title="結果", border_style="blue"))
+            else:
+                # 通常の会話応答
+                if ai.memory_candidate:
+                    # 記憶確認を含む応答
+                    main_response, confirmation = response.rsplit("\n\n", 1)
+                    console.print(f"\n[bold purple]AI[/bold purple]: {main_response}")
+                    console.print(Panel(confirmation, border_style="yellow"))
+                else:
+                    # 通常の応答
+                    console.print(f"\n[bold purple]AI[/bold purple]: {response}")
             
         except KeyboardInterrupt:
-            print("\n\nプログラムを終了します...")
+            console.print("\n\n[bold red]プログラムを終了します...[/bold red]")
             break
         except Exception as e:
-            print(f"\nエラーが発生しました: {str(e)}")
+            console.print(f"\n[bold red]エラーが発生しました:[/bold red] {str(e)}")
