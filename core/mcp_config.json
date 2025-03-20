@@ -1,0 +1,10 @@
+{
+    "title": "core",
+    "provider": "ollama",
+    "model": "llama3.3",
+    "mcpServers": {
+      "ollama": {
+        "endpoint": "http://localhost:11434"
+      }
+    }
+  }

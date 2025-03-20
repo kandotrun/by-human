@@ -9,7 +9,8 @@ dependencies = [
     "opencv-python",
     "numpy",
     "torch",
-    "ultralytics"
+    "ultralytics",
+    "dolphin-mcp>=0.1.0",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
@@ -23,6 +24,9 @@ managed = true
 dev-dependencies = [
     "black>=23.1.0"
 ]
+
+[tool.rye.scripts]
+main = { cmd = "python -m core.main" }
 
 [tool.hatch.metadata]
 allow-direct-references = true
