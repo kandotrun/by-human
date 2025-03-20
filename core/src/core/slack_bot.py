@@ -28,6 +28,8 @@ import asyncio
 from functools import partial
 import sqlite3
 import hashlib
+import threading
+import atexit
 
 # browser-use関連のインポート（インストールされている場合のみ）
 BROWSER_USE_AVAILABLE = False
@@ -77,6 +79,128 @@ FALLBACK_IMAGE_MODELS = ["llava", "bakllava", "llava:latest"]
 
 # Slackアプリの初期化
 app = App(token=SLACK_BOT_TOKEN)
+
+# WebClientを多くの場所で使うので、インポートを上部に移動
+from slack_sdk.web import WebClient
+
+
+def set_bot_status(
+    status_text="起動中！", status_emoji=":robot_face:", presence="auto"
+):
+    """
+    ボットのステータスを設定する
+
+    Args:
+        status_text: ステータスメッセージ
+        status_emoji: ステータス絵文字
+        presence: プレゼンス状態（"auto" または "away"）
+    """
+    if not SLACK_BOT_TOKEN:
+        logger.warning(
+            "SLACK_BOT_TOKENが設定されていないため、ステータスを設定できません"
+        )
+        return
+
+    try:
+        client = WebClient(token=SLACK_BOT_TOKEN)
+
+        # プレゼンス（オンライン状態）を設定
+        try:
+            client.users_setPresence(presence=presence)
+        except Exception as presence_error:
+            logger.warning(f"プレゼンス設定中にエラー: {str(presence_error)}")
+
+        # ステータスを設定
+        try:
+            client.users_profile_set(
+                profile={
+                    "status_text": status_text,
+                    "status_emoji": status_emoji,
+                    "status_expiration": 0,
+                }
+            )
+            logger.info(f"ボットステータスを設定: {status_text}")
+        except Exception as profile_error:
+            # ステータス設定権限がない場合はエラーを記録するだけで続行
+            logger.warning(f"プロフィール設定中にエラー: {str(profile_error)}")
+
+    except Exception as e:
+        logger.error(f"ボットステータス設定中にエラー: {str(e)}")
+
+
+# グローバル変数としてボットのスレッドを保持
+_bot_thread = None
+_bot_exit_event = None
+
+
+def start_slack_bot_in_background():
+    """
+    CLIからSlackボットをバックグラウンドスレッドで起動する
+    """
+    import threading
+
+    global _bot_thread, _bot_exit_event
+
+    # すでに起動している場合は何もしない
+    if _bot_thread is not None and _bot_thread.is_alive():
+        logger.info("Slackボットはすでに起動しています")
+        return True
+
+    if not SLACK_BOT_TOKEN or not SLACK_APP_TOKEN:
+        logger.warning("Slackボットの起動に必要な環境変数が設定されていません")
+        return False
+
+    logger.info("Slackボットをバックグラウンドで起動します...")
+
+    # スレッド終了用のイベント
+    _bot_exit_event = threading.Event()
+
+    def run_bot():
+        try:
+            # ボットを起動したらステータスを「起動中！」に設定
+            set_bot_status(
+                status_text="起動中！", status_emoji=":robot_face:", presence="auto"
+            )
+
+            handler = SocketModeHandler(app, SLACK_APP_TOKEN)
+            logger.info("Socket Modeハンドラを作成しました")
+
+            # 終了イベントが設定されるまで実行
+            handler.connect()
+            while not _bot_exit_event.is_set():
+                try:
+                    handler.client.process_message()
+                except Exception as e:
+                    if "interpreter shutdown" in str(e):
+                        logger.info(
+                            "インタープリタシャットダウンのため処理を停止します"
+                        )
+                        break
+                    logger.error(f"メッセージ処理中のエラー: {str(e)}")
+                    # 短い待機を入れてCPU使用率を抑える
+                    time.sleep(0.1)
+
+        except Exception as e:
+            logger.error(f"バックグラウンドでのSlackボット起動に失敗: {str(e)}")
+
+    # バックグラウンドスレッドでボットを起動
+    _bot_thread = threading.Thread(target=run_bot, daemon=True)
+    _bot_thread.start()
+    logger.info("Slackボットをバックグラウンドで起動しました")
+
+    # 終了時にクリーンアップを行うための関数をregister
+    def cleanup_slack_bot():
+        if _bot_exit_event:
+            logger.info("Slackボットを終了しています...")
+            _bot_exit_event.set()
+
+            # 少し待ってからスレッドに終了を伝える
+            if _bot_thread and _bot_thread.is_alive():
+                _bot_thread.join(timeout=1.0)
+
+    atexit.register(cleanup_slack_bot)
+
+    return True
 
 
 # Canvasメモ帳に関するスラッシュコマンドハンドラ
@@ -1497,159 +1621,162 @@ def process_and_respond(
     """
     logger.debug(f"メッセージ処理開始: '{text}'")
 
-    # 特別なコマンド処理
-    if text.startswith("!help") or text == "!":
-        logger.info("ヘルプコマンドを処理します")
-        help_response = handle_help_command(ai)
-        say(help_response, thread_ts=thread_ts)
-        logger.debug(f"ヘルプコマンド応答送信完了: {len(help_response)} 文字")
-        return
+    # 処理開始時にステータスを「返信中！」に変更
+    set_bot_status(
+        status_text="返信中！", status_emoji=":hourglass_flowing_sand:", presence="auto"
+    )
 
-    # コマンド変換: !command → /command
-    if text.startswith("!"):
-        new_text = "/" + text[1:]
-        logger.debug(f"コマンド変換: '{text}' → '{new_text}'")
-        text = new_text
-
-    # 記憶確認応答処理
-    if ai.memory_candidate is not None:
-        logger.info(f"記憶確認応答処理: ユーザー入力 '{text}'")
-        if text.lower() in ["y", "yes", "はい", "うん", "そう"]:
-            key = ai.memory_candidate["key"]
-            value = ai.memory_candidate["value"]
-            logger.info(f"記憶を保存: '{key}: {value}'")
-            ai.save_profile_info(key, value)
-            ai.memory_candidate = None
-            say(f"「{key}: {value}」を記憶しました。", thread_ts=thread_ts)
-            return
-        elif text.lower() in ["n", "no", "いいえ", "違う", "ちがう"]:
-            logger.info("記憶確認拒否")
-            ai.memory_candidate = None
-            say("わかりました。記憶しません。", thread_ts=thread_ts)
+    try:
+        # 特別なコマンド処理
+        if text.startswith("!help") or text == "!":
+            logger.info("ヘルプコマンドを処理します")
+            help_response = handle_help_command(ai)
+            say(help_response, thread_ts=thread_ts)
+            logger.debug(f"ヘルプコマンド応答送信完了: {len(help_response)} 文字")
             return
 
-    # リンクコマンド処理
-    if text.startswith("/link"):
-        logger.info(f"リンクコマンド検出: '{text}'")
-        # ユーザーIDを取得
-        user_id = ai.user_id.replace("slack_", "")
+        # コマンド変換: !command → /command
+        if text.startswith("!"):
+            new_text = "/" + text[1:]
+            logger.debug(f"コマンド変換: '{text}' → '{new_text}'")
+            text = new_text
 
-        # リンクコードを生成
-        link_code = user_link_manager.generate_link_code(user_id)
+        # 記憶確認応答処理
+        if ai.memory_candidate is not None:
+            logger.info(f"記憶確認応答処理: ユーザー入力 '{text}'")
+            if text.lower() in ["y", "yes", "はい", "うん", "そう"]:
+                key = ai.memory_candidate["key"]
+                value = ai.memory_candidate["value"]
+                logger.info(f"記憶を保存: '{key}: {value}'")
+                ai.save_profile_info(key, value)
+                ai.memory_candidate = None
+                say(f"「{key}: {value}」を記憶しました。", thread_ts=thread_ts)
+                return
+            elif text.lower() in ["n", "no", "いいえ", "違う", "ちがう"]:
+                logger.info("記憶確認拒否")
+                ai.memory_candidate = None
+                say("わかりました。記憶しません。", thread_ts=thread_ts)
+                return
 
-        # コマンドラインツール用の使い方を表示
-        cli_command = f"personal-ai link {link_code}"
+        # リンクコマンド処理
+        if text.startswith("/link"):
+            logger.info(f"リンクコマンド検出: '{text}'")
+            # ユーザーIDを取得
+            user_id = ai.user_id.replace("slack_", "")
 
-        say(
-            f"*CLIとSlackアカウントのリンク*\n\nCLIアプリケーションで次のコマンドを実行してリンクを完了してください:\n```\n{cli_command}\n```\n\nこのリンクコードは現在無期限で有効です（テスト中）。",
-            thread_ts=thread_ts,
-        )
-        return
+            # リンクコードを生成
+            link_code = user_link_manager.generate_link_code(user_id)
 
-    # browser-useコマンド処理
-    if text.startswith("/browser") or text.startswith("/browse"):
-        logger.info(f"browser-useコマンド検出: '{text}'")
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
+            # コマンドラインツール用の使い方を表示
+            cli_command = f"personal-ai link {link_code}"
+
             say(
-                "使用法: /browser <タスク内容>\n例: /browser OpenAIのウェブサイトにアクセスして最新の情報を取得",
+                f"*CLIとSlackアカウントのリンク*\n\nCLIアプリケーションで次のコマンドを実行してリンクを完了してください:\n```\n{cli_command}\n```\n\nこのリンクコードは現在無期限で有効です（テスト中）。",
                 thread_ts=thread_ts,
             )
             return
 
-        task = parts[1]
-        # チャンネルIDを取得
-        channel_id = None
-        from slack_sdk.web import WebClient
-
-        client = WebClient(token=SLACK_BOT_TOKEN)
-
-        try:
-            # スレッド情報からチャンネルIDを取得
-            if thread_ts:
-                response = client.conversations_replies(
-                    channel="C067RCQEZQX",  # デフォルトチャンネル
-                    ts=thread_ts,
-                )
-                if response and response.get("ok"):
-                    channel_id = response.get("channel")
-        except Exception:
-            channel_id = "C067RCQEZQX"  # デフォルトチャンネル
-
-        # ユーザーIDを取得
-        user_id = ai.user_id.replace("slack_", "")
-
-        # browser-useタスクを実行
-        handle_browser_use(ai, task, user_id, channel_id, thread_ts, say)
-        return
-
-    # 画像表示リクエストの処理（優先的に処理）
-    if text.startswith("/image") or is_image_request(text):
-        logger.info(f"画像リクエスト検出: '{text}'")
-        # スレッドのチャンネルIDを取得
-        channel_id = None
-        if thread_ts:
-            try:
-                from slack_sdk.web import WebClient
-
-                client = WebClient(token=SLACK_BOT_TOKEN)
-                # スレッド情報からチャンネルIDを取得する試み
-                for channel_type in ["conversations.replies", "channels.replies"]:
-                    try:
-                        if channel_type == "conversations.replies":
-                            response = client.conversations_replies(
-                                channel="C067RCQEZQX",  # デフォルトチャンネル
-                                ts=thread_ts,
-                            )
-                        else:
-                            response = client.channels_replies(
-                                channel="C067RCQEZQX",  # デフォルトチャンネル
-                                thread_ts=thread_ts,
-                            )
-                        if response and response.get("ok"):
-                            channel_id = response.get("channel")
-                            logger.info(
-                                f"スレッド情報からチャンネルID '{channel_id}' を取得しました"
-                            )
-                            break
-                    except Exception as e:
-                        logger.debug(
-                            f"{channel_type}でのチャンネルID取得に失敗: {str(e)}"
-                        )
-                        continue
-            except Exception as e:
-                logger.warning(f"チャンネルID取得中にエラー: {str(e)}")
-                channel_id = "C067RCQEZQX"  # デフォルトチャンネル
-
-        process_image_request(ai, text, say, thread_ts, channel_id)
-        return
-
-    # コマンド処理
-    if text.startswith("/"):
-        logger.info(f"コマンド検出: '{text}'")
-        cmd_parts = text.split()
-        cmd = cmd_parts[0][1:]  # 先頭の/を除去
-        cmd_args = cmd_parts[1:] if len(cmd_parts) > 1 else []
-
-        if cmd in ai.command_handlers:
-            logger.info(f"コマンド実行: {cmd}, 引数: {cmd_args}")
-            try:
-                result = ai.command_handlers[f"/{cmd}"](cmd_args)
-                logger.debug(f"コマンド実行結果: {result[:100]}...")
-                say(format_command_result(result), thread_ts=thread_ts)
-                return
-            except Exception as e:
-                logger.error(f"コマンド実行エラー: {str(e)}", exc_info=True)
+        # browser-useコマンド処理
+        if text.startswith("/browser") or text.startswith("/browse"):
+            logger.info(f"browser-useコマンド検出: '{text}'")
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
                 say(
-                    f"コマンド実行中にエラーが発生しました: {str(e)}",
+                    "使用法: /browser <タスク内容>\n例: /browser OpenAIのウェブサイトにアクセスして最新の情報を取得",
                     thread_ts=thread_ts,
                 )
                 return
 
-    # 通常の会話処理
-    logger.info("AI応答を生成します")
-    start_time = datetime.now()
-    try:
+            task = parts[1]
+            # チャンネルIDを取得
+            channel_id = None
+
+            client = WebClient(token=SLACK_BOT_TOKEN)
+
+            try:
+                # スレッド情報からチャンネルIDを取得
+                if thread_ts:
+                    response = client.conversations_replies(
+                        channel="C067RCQEZQX",  # デフォルトチャンネル
+                        ts=thread_ts,
+                    )
+                    if response and response.get("ok"):
+                        channel_id = response.get("channel")
+            except Exception:
+                channel_id = "C067RCQEZQX"  # デフォルトチャンネル
+
+            # ユーザーIDを取得
+            user_id = ai.user_id.replace("slack_", "")
+
+            # browser-useタスクを実行
+            handle_browser_use(ai, task, user_id, channel_id, thread_ts, say)
+            return
+
+        # 画像表示リクエストの処理（優先的に処理）
+        if text.startswith("/image") or is_image_request(text):
+            logger.info(f"画像リクエスト検出: '{text}'")
+            # スレッドのチャンネルIDを取得
+            channel_id = None
+            if thread_ts:
+                try:
+                    client = WebClient(token=SLACK_BOT_TOKEN)
+                    # スレッド情報からチャンネルIDを取得する試み
+                    for channel_type in ["conversations.replies", "channels.replies"]:
+                        try:
+                            if channel_type == "conversations.replies":
+                                response = client.conversations_replies(
+                                    channel="C067RCQEZQX",  # デフォルトチャンネル
+                                    ts=thread_ts,
+                                )
+                            else:
+                                response = client.channels_replies(
+                                    channel="C067RCQEZQX",  # デフォルトチャンネル
+                                    thread_ts=thread_ts,
+                                )
+                            if response and response.get("ok"):
+                                channel_id = response.get("channel")
+                                logger.info(
+                                    f"スレッド情報からチャンネルID '{channel_id}' を取得しました"
+                                )
+                                break
+                        except Exception as e:
+                            logger.debug(
+                                f"{channel_type}でのチャンネルID取得に失敗: {str(e)}"
+                            )
+                            continue
+                except Exception as e:
+                    logger.warning(f"チャンネルID取得中にエラー: {str(e)}")
+                    channel_id = "C067RCQEZQX"  # デフォルトチャンネル
+
+            process_image_request(ai, text, say, thread_ts, channel_id)
+            return
+
+        # コマンド処理
+        if text.startswith("/"):
+            logger.info(f"コマンド検出: '{text}'")
+            cmd_parts = text.split()
+            cmd = cmd_parts[0][1:]  # 先頭の/を除去
+            cmd_args = cmd_parts[1:] if len(cmd_parts) > 1 else []
+
+            if cmd in ai.command_handlers:
+                logger.info(f"コマンド実行: {cmd}, 引数: {cmd_args}")
+                try:
+                    result = ai.command_handlers[f"/{cmd}"](cmd_args)
+                    logger.debug(f"コマンド実行結果: {result[:100]}...")
+                    say(format_command_result(result), thread_ts=thread_ts)
+                    return
+                except Exception as e:
+                    logger.error(f"コマンド実行エラー: {str(e)}", exc_info=True)
+                    say(
+                        f"コマンド実行中にエラーが発生しました: {str(e)}",
+                        thread_ts=thread_ts,
+                    )
+                    return
+
+        # 通常の会話処理
+        logger.info("AI応答を生成します")
+        start_time = datetime.now()
+
         # 検索タスクの検出
         search_keywords = [
             "検索して",
@@ -1704,8 +1831,6 @@ def process_and_respond(
             channel_id = None
             if thread_ts:
                 try:
-                    from slack_sdk.web import WebClient
-
                     client = WebClient(token=SLACK_BOT_TOKEN)
                     response = client.conversations_replies(
                         channel="C067RCQEZQX",
@@ -1743,6 +1868,11 @@ def process_and_respond(
     except Exception as e:
         logger.error(f"応答生成中にエラーが発生しました: {str(e)}", exc_info=True)
         say(f"応答生成中にエラーが発生しました: {str(e)}", thread_ts=thread_ts)
+    finally:
+        # 処理完了時にステータスを「起動中！」に戻す
+        set_bot_status(
+            status_text="起動中！", status_emoji=":robot_face:", presence="auto"
+        )
 
 
 def handle_image_message(
@@ -3037,7 +3167,7 @@ def start_slack_bot():
         logger.info("OLLAMA_MODEL=llama3.3")
         logger.info("IMAGE_MODEL=gemma3:27b")
         logger.info("OLLAMA_HOST=http://localhost:11434")
-        return
+        return False
 
     logger.info(f"ボット設定: テキストモデル={OLLAMA_MODEL}, 画像モデル={IMAGE_MODEL}")
 
@@ -3082,14 +3212,54 @@ def start_slack_bot():
 
     try:
         logger.info("Slackボットを起動中...")
+
+        # ボットを起動したらステータスを「起動中！」に設定
+        set_bot_status(
+            status_text="起動中！", status_emoji=":robot_face:", presence="auto"
+        )
+
         handler = SocketModeHandler(app, SLACK_APP_TOKEN)
         logger.info("Socket Modeハンドラを作成しました")
         logger.info("接続を開始します...")
         handler.start()
+        return True
     except Exception as e:
         logger.error(
             f"Slackボットの起動中にエラーが発生しました: {str(e)}", exc_info=True
         )
+        return False
+
+
+def start_slack_bot_in_background():
+    """
+    CLIからSlackボットをバックグラウンドスレッドで起動する
+    """
+    if not SLACK_BOT_TOKEN or not SLACK_APP_TOKEN:
+        logger.warning("Slackボットの起動に必要な環境変数が設定されていません")
+        return False
+
+    logger.info("Slackボットをバックグラウンドで起動します...")
+
+    def run_bot():
+        try:
+            # ボットを起動したらステータスを「起動中！」に設定
+            set_bot_status(
+                status_text="起動中！", status_emoji=":robot_face:", presence="auto"
+            )
+
+            handler = SocketModeHandler(app, SLACK_APP_TOKEN)
+            logger.info("Socket Modeハンドラを作成しました")
+            handler.start()
+        except Exception as e:
+            logger.error(
+                f"バックグラウンドでのSlackボット起動に失敗: {str(e)}", exc_info=True
+            )
+
+    # バックグラウンドスレッドでボットを起動
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    logger.info("Slackボットをバックグラウンドで起動しました")
+    return True
 
 
 if __name__ == "__main__":

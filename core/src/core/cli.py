@@ -25,6 +25,17 @@ def main():
     """
     メイン関数
     """
+    # Slackボットをバックグラウンドで起動
+    try:
+        from .slack_bot import start_slack_bot_in_background
+
+        start_slack_bot_in_background()
+    except Exception as e:
+        # consoleはすでにグローバルで定義されているため、再定義しない
+        console.print(
+            f"[bold yellow]警告: Slackボットの起動に失敗しました: {str(e)}[/]"
+        )
+
     # コマンドライン引数のパース
     parser = argparse.ArgumentParser(description="パーソナライズAIアシスタント")
     parser.add_argument(

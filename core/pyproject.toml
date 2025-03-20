@@ -71,3 +71,6 @@ geocoder = "^1.38.1"
 slack-bolt = "^1.18.1"
 pillow = "^10.2.0"
 requests = "^2.31.0"
+
+[project.scripts]
+personal-ai = "core:main"
