@@ -11,6 +11,11 @@ dependencies = [
     "torch",
     "ultralytics",
     "dolphin-mcp>=0.1.0",
+    "langchain",
+    "ollama",
+    "langchain-community>=0.3.20",
+    "langchain-ollama>=0.2.3",
+    "rich>=13.9.4",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
