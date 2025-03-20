@@ -18,12 +18,17 @@ import sys
 from contextlib import redirect_stderr, redirect_stdout
 from typing import List, Dict, Any, Optional, Tuple
 
-# LangChainの非推奨警告を抑制
+# 警告メッセージを抑制
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", message=".*The class.*LLMChain.*was deprecated.*")
 warnings.filterwarnings("ignore", message=".*The method.*Chain.run.*was deprecated.*")
+warnings.filterwarnings("ignore", message=".*The class.*OllamaEmbeddings.*was deprecated.*")
+warnings.filterwarnings("ignore", message=".*The class.*Chroma.*was deprecated.*")
+warnings.filterwarnings("ignore", category=SyntaxWarning, module='geocoder')
 
-from langchain_ollama import OllamaLLM
+import geocoder
+from langchain_ollama import OllamaLLM, OllamaEmbeddings
+from langchain_chroma import Chroma
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain.tools import BaseTool
@@ -79,10 +84,172 @@ class MarkdownFileTool(BaseTool):
     def _arun(self, query: str):
         raise NotImplementedError("このツールは非同期実行をサポートしていません")
 
+class VectorMemory:
+    """会話や情報をベクトル化して保存・検索するためのクラス"""
+    
+    def __init__(self, user_id: str, ollama_model: str = "llama3.3", persist_directory: str = "vector_memories"):
+        """
+        初期化
+        
+        Args:
+            user_id: ユーザーの一意識別子
+            ollama_model: 使用するOllamaモデル名
+            persist_directory: ベクトルデータの保存先ディレクトリ
+        """
+        self.user_id = user_id
+        self.persist_directory = f"{persist_directory}/{user_id}"
+        
+        # エンベディングモデルの初期化
+        self.embeddings = OllamaEmbeddings(model=ollama_model)
+        
+        # ベクトルストアの初期化
+        self._initialize_vector_store()
+    
+    def _initialize_vector_store(self):
+        """ベクトルストアを初期化（存在する場合はロード、存在しない場合は新規作成）"""
+        os.makedirs(self.persist_directory, exist_ok=True)
+        
+        try:
+            # 既存のベクトルストアをロード
+            self.vector_store = Chroma(
+                persist_directory=self.persist_directory,
+                embedding_function=self.embeddings
+            )
+        except Exception:
+            # 新規作成
+            self.vector_store = Chroma(
+                persist_directory=self.persist_directory,
+                embedding_function=self.embeddings
+            )
+    
+    def add_texts(self, texts: List[str], metadatas: Optional[List[Dict[str, Any]]] = None) -> List[str]:
+        """
+        テキストをベクトル化して保存
+        
+        Args:
+            texts: ベクトル化するテキストのリスト
+            metadatas: テキストに関連するメタデータのリスト
+            
+        Returns:
+            保存されたドキュメントのID
+        """
+        return self.vector_store.add_texts(texts=texts, metadatas=metadatas)
+    
+    def add_conversation(self, human_input: str, ai_output: str, conversation_id: str, timestamp: str) -> List[str]:
+        """
+        会話をベクトル化して保存
+        
+        Args:
+            human_input: ユーザーの入力
+            ai_output: AIの応答
+            conversation_id: 会話ID
+            timestamp: タイムスタンプ
+            
+        Returns:
+            保存されたドキュメントのID
+        """
+        # 会話全体を1つのテキストとしてベクトル化
+        combined_text = f"ユーザー: {human_input}\nAI: {ai_output}"
+        
+        # メタデータの設定
+        metadata = {
+            "type": "conversation",
+            "conversation_id": conversation_id,
+            "timestamp": timestamp,
+            "human_input": human_input,
+            "ai_output": ai_output
+        }
+        
+        return self.add_texts([combined_text], [metadata])
+    
+    def add_profile_info(self, key: str, value: str) -> List[str]:
+        """
+        プロファイル情報をベクトル化して保存
+        
+        Args:
+            key: プロファイル情報のキー
+            value: プロファイル情報の値
+            
+        Returns:
+            保存されたドキュメントのID
+        """
+        # プロファイル情報をテキスト化
+        text = f"{key}: {value}"
+        
+        # メタデータの設定
+        metadata = {
+            "type": "profile",
+            "key": key,
+            "value": value,
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        return self.add_texts([text], [metadata])
+    
+    def search(self, query: str, k: int = 5, filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        関連する記憶を検索
+        
+        Args:
+            query: 検索クエリ
+            k: 取得する結果の最大数
+            filter: フィルタリング条件
+            
+        Returns:
+            関連する記憶のリスト
+        """
+        documents = self.vector_store.similarity_search(
+            query=query,
+            k=k,
+            filter=filter
+        )
+        
+        results = []
+        for doc in documents:
+            result = {
+                "content": doc.page_content,
+                "metadata": doc.metadata
+            }
+            results.append(result)
+        
+        return results
+    
+    def search_conversations(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """
+        関連する会話を検索
+        
+        Args:
+            query: 検索クエリ
+            k: 取得する結果の最大数
+            
+        Returns:
+            関連する会話のリスト
+        """
+        return self.search(query, k, {"type": "conversation"})
+    
+    def search_profile(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """
+        関連するプロファイル情報を検索
+        
+        Args:
+            query: 検索クエリ
+            k: 取得する結果の最大数
+            
+        Returns:
+            関連するプロファイル情報のリスト
+        """
+        return self.search(query, k, {"type": "profile"})
+    
+    def clear(self) -> None:
+        """ベクトルストアを削除"""
+        self.vector_store.delete_collection()
+        self._initialize_vector_store()
+
 class MarkdownMemory:
     """Markdownファイルを使用して会話履歴と個人情報を保存するカスタムメモリクラス"""
     
-    def __init__(self, user_id: str, memory_dir: str = "memories", file_tool: MarkdownFileTool = None):
+    def __init__(self, user_id: str, memory_dir: str = "memories", file_tool: MarkdownFileTool = None, 
+                vector_memory: VectorMemory = None, ollama_model: str = "llama3.3"):
         """
         初期化
         
@@ -90,10 +257,12 @@ class MarkdownMemory:
             user_id: ユーザーの一意識別子
             memory_dir: 記憶を保存するディレクトリ
             file_tool: ファイル操作ツール
+            vector_memory: ベクトルメモリ（Noneの場合は新規作成）
+            ollama_model: 使用するOllamaモデル名
         """
         self.user_id = user_id
         self.memory_dir = memory_dir
-        self.conversation_file = f"{memory_dir}/{user_id}_conversations.md"
+        self.conversations_dir = f"{memory_dir}/{user_id}_conversations"
         self.profile_file = f"{memory_dir}/{user_id}_profile.md"
         self.preferences_file = f"{memory_dir}/{user_id}_preferences.md"
         self.feedback_file = f"{memory_dir}/{user_id}_feedback.md"
@@ -102,12 +271,15 @@ class MarkdownMemory:
         # ファイル操作ツール
         self.file_tool = file_tool if file_tool else MarkdownFileTool()
         
+        # ベクトルメモリ
+        self.vector_memory = vector_memory if vector_memory else VectorMemory(user_id, ollama_model)
+        
         # ディレクトリが存在しない場合は作成
         os.makedirs(memory_dir, exist_ok=True)
+        os.makedirs(self.conversations_dir, exist_ok=True)
         
         # 各ファイルが存在しない場合は作成
         for file_path, header in [
-            (self.conversation_file, "# 会話履歴\n\n"),
             (self.profile_file, "# ユーザープロファイル\n\n"),
             (self.preferences_file, "# ユーザー設定\n\n"),
             (self.feedback_file, "# フィードバック履歴\n\n"),
@@ -115,6 +287,24 @@ class MarkdownMemory:
         ]:
             if not os.path.exists(file_path):
                 self.file_tool._run("write", file_path, header)
+                
+        # 今日の会話ファイルが存在しない場合は作成
+        today_file = self._get_conversation_file_for_date(datetime.datetime.now())
+        if not os.path.exists(today_file):
+            self.file_tool._run("write", today_file, f"# {datetime.datetime.now().strftime('%Y年%m月%d日')}の会話履歴\n\n")
+    
+    def _get_conversation_file_for_date(self, date: datetime.datetime) -> str:
+        """
+        指定された日付の会話ファイルパスを取得
+        
+        Args:
+            date: 日付
+            
+        Returns:
+            ファイルパス
+        """
+        date_str = date.strftime("%Y-%m-%d")
+        return f"{self.conversations_dir}/{date_str}.md"
     
     def save_conversation(self, human_input: str, ai_output: str, conversation_id: str = None) -> str:
         """
@@ -139,7 +329,22 @@ class MarkdownMemory:
         content += f"### AI\n\n{ai_output}\n\n"
         content += "---\n\n"
         
-        self.file_tool._run("append", self.conversation_file, content)
+        # 現在の日付のファイルに保存
+        current_date = datetime.datetime.now()
+        conversation_file = self._get_conversation_file_for_date(current_date)
+        
+        # ファイルが存在しない場合は作成
+        if not os.path.exists(conversation_file):
+            header = f"# {current_date.strftime('%Y年%m月%d日')}の会話履歴\n\n"
+            self.file_tool._run("write", conversation_file, header)
+        
+        self.file_tool._run("append", conversation_file, content)
+        
+        # ベクトルメモリにも保存
+        try:
+            self.vector_memory.add_conversation(human_input, ai_output, conversation_id, timestamp)
+        except Exception as e:
+            print(f"ベクトルメモリへの保存に失敗しました: {str(e)}")
             
         return conversation_id
     
@@ -166,6 +371,12 @@ class MarkdownMemory:
         
         # 更新された内容を書き込む
         self.file_tool._run("write", self.profile_file, "\n".join(lines))
+        
+        # ベクトルメモリにも保存
+        try:
+            self.vector_memory.add_profile_info(key, value)
+        except Exception as e:
+            print(f"ベクトルメモリへの保存に失敗しました: {str(e)}")
     
     def save_preference(self, category: str, key: str, value: str) -> None:
         """ユーザー設定を保存または更新"""
@@ -256,18 +467,49 @@ class MarkdownMemory:
     
     def get_recent_conversations(self, n: int = 5) -> str:
         """最近のn件の会話を取得"""
-        content = self.file_tool._run("read", self.conversation_file)
+        # 日付の降順で会話ファイルを取得
+        conversation_files = []
+        if os.path.exists(self.conversations_dir):
+            for file_name in sorted(os.listdir(self.conversations_dir), reverse=True):
+                if file_name.endswith(".md"):
+                    conversation_files.append(os.path.join(self.conversations_dir, file_name))
         
-        if not content:
+        all_conversations = []
+        remaining_count = n
+        
+        # 最新のファイルから順に会話を取得
+        for file_path in conversation_files:
+            if remaining_count <= 0:
+                break
+                
+            content = self.file_tool._run("read", file_path)
+            if not content:
+                continue
+                
+            # ヘッダーを除去
+            if "# " in content and "\n\n" in content:
+                content = content.split("\n\n", 1)[1]
+                
+            # 会話を分割（"---"で区切られている）
+            conversations = content.split("---")
+            
+            # 空の要素を除去
+            conversations = [conv for conv in conversations if conv.strip()]
+            
+            # 最新のものから追加
+            for conv in reversed(conversations):
+                if remaining_count <= 0:
+                    break
+                all_conversations.append(conv)
+                remaining_count -= 1
+        
+        # 取得した順（新しい順）に並べ替え
+        all_conversations.reverse()
+        
+        if not all_conversations:
             return ""
-        
-        # 会話を分割（"---"で区切られている）
-        conversations = content.split("---")
-        
-        # 最新のn件を取得（最後の空要素を除く）
-        recent_conversations = conversations[-n-1:-1] if len(conversations) > 1 else conversations
-        
-        return "---".join(recent_conversations)
+            
+        return "---\n\n".join(all_conversations) + "---\n\n"
     
     def get_profile(self) -> str:
         """ユーザープロファイルを取得"""
@@ -284,6 +526,48 @@ class MarkdownMemory:
     def get_satisfaction_trends(self) -> str:
         """満足度傾向を取得"""
         return self.file_tool._run("read", self.satisfaction_file)
+
+    def search_related_memories(self, query: str, k: int = 3) -> str:
+        """
+        質問に関連する記憶を検索
+        
+        Args:
+            query: 検索クエリ
+            k: 取得する記憶の数
+            
+        Returns:
+            関連する記憶のテキスト表現
+        """
+        try:
+            # 関連する会話とプロファイル情報を検索
+            conversations = self.vector_memory.search_conversations(query, k)
+            profiles = self.vector_memory.search_profile(query, k)
+            
+            result = ""
+            
+            # プロファイル情報を追加
+            if profiles:
+                result += "## 関連するプロファイル情報\n\n"
+                for i, profile in enumerate(profiles):
+                    result += f"{i+1}. {profile['content']}\n"
+                result += "\n"
+            
+            # 会話を追加
+            if conversations:
+                result += "## 関連する過去の会話\n\n"
+                for i, conv in enumerate(conversations):
+                    human = conv['metadata'].get('human_input', '')
+                    ai = conv['metadata'].get('ai_output', '')
+                    timestamp = conv['metadata'].get('timestamp', '')
+                    
+                    result += f"{i+1}. {timestamp}\n"
+                    result += f"   ユーザー: {human}\n"
+                    result += f"   AI: {ai}\n\n"
+            
+            return result
+        except Exception as e:
+            print(f"記憶の検索に失敗しました: {str(e)}")
+            return ""
 
 class FeedbackAnalyzer:
     """ユーザーの反応からフィードバックを分析するクラス"""
@@ -470,8 +754,16 @@ class PersonalAI:
         # ツールの初期化
         self.file_tool = MarkdownFileTool()
         
+        # ベクトルメモリの初期化
+        self.vector_memory = VectorMemory(user_id, ollama_model)
+        
         # メモリの初期化
-        self.memory = MarkdownMemory(user_id, file_tool=self.file_tool)
+        self.memory = MarkdownMemory(
+            user_id=user_id, 
+            file_tool=self.file_tool,
+            vector_memory=self.vector_memory,
+            ollama_model=ollama_model
+        )
         
         # 会話履歴
         self.conversation_history = []
@@ -499,6 +791,7 @@ class PersonalAI:
             "/settings": self._handle_settings,
             "/history": self._handle_history,
             "/clear": self._handle_clear,
+            "/search": self._handle_search,
         }
         
         # 記憶する情報の候補
@@ -623,6 +916,7 @@ class PersonalAI:
 /settings - 設定を表示/変更
 /history [数] - 過去の会話履歴を表示
 /clear - 現在の会話履歴をクリア
+/search <クエリ> - 関連する記憶を検索
 """
     
     def _handle_remember(self, args: List[str]) -> str:
@@ -749,6 +1043,19 @@ JSONで以下の形式で応答してください：
         except:
             return None
     
+    def _handle_search(self, args: List[str]) -> str:
+        """記憶検索コマンドを処理"""
+        if not args:
+            return "使用法: /search <検索クエリ>"
+        
+        query = " ".join(args)
+        related_memories = self.memory.search_related_memories(query)
+        
+        if not related_memories:
+            return "関連する記憶は見つかりませんでした。"
+        
+        return related_memories
+
     def generate_response(self, human_input: str) -> str:
         """
         ユーザーの入力に基づいてAIの応答を生成
@@ -784,18 +1091,43 @@ JSONで以下の形式で応答してください：
         profile_info = self.get_profile()
         preferences = self.get_preferences()
         
+        # 関連する記憶を検索
+        related_memories = self.memory.search_related_memories(human_input)
+        
+        # 現在の日時情報を取得
+        current_datetime = datetime.datetime.now().strftime("%Y年%m月%d日 %H時%M分")
+        current_day_of_week = ["月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日", "日曜日"][datetime.datetime.now().weekday()]
+        
+        # 位置情報を取得（エラー処理を含む）
+        location_info = "利用不可"
+        try:
+            g = geocoder.ip('me')
+            if g.ok and g.city:
+                location_info = f"{g.city}, {g.state}, {g.country}"
+        except Exception:
+            pass
+        
         # プロンプト作成
         prompt = PromptTemplate(
-            input_variables=["history", "question", "profile", "preferences", "recent_conversations"],
+            input_variables=["history", "question", "profile", "preferences", "recent_conversations", 
+                           "current_datetime", "day_of_week", "location", "related_memories"],
             template="""
 ユーザーの質問に対して、保存されている情報と会話履歴に基づいて役立つ応答を生成してください。
 ユーザーの好みやプロファイル情報を考慮してください。
+特に関連性の高い記憶を適切に活用してください。
+
+## システム情報
+現在日時: {current_datetime} ({day_of_week})
+現在位置: {location}
 
 ## ユーザープロファイル
 {profile}
 
 ## ユーザー設定
 {preferences}
+
+## 関連する記憶（質問に関連性の高い順）
+{related_memories}
 
 ## 最近の会話
 {recent_conversations}
@@ -823,7 +1155,11 @@ JSONで以下の形式で応答してください：
             question=human_input,
             profile=profile_info,
             preferences=preferences,
-            recent_conversations=recent_conversations
+            recent_conversations=recent_conversations,
+            current_datetime=current_datetime,
+            day_of_week=current_day_of_week,
+            location=location_info,
+            related_memories=related_memories
         )
         
         # 記憶すべき情報があるか検出
@@ -872,11 +1208,16 @@ if __name__ == "__main__":
     console.print("\n[dim]コマンド一覧を表示するには [bold]/help[/bold] と入力してください。[/dim]")
     console.print("[dim]終了するには [bold]exit[/bold] または [bold]quit[/bold] と入力してください。[/dim]\n")
     
+    # すべての出力を抑制
+    stderr_buffer = io.StringIO()
+    stdout_buffer = io.StringIO()
+    
     # 対話ループ
     while True:
         try:
             # ユーザー入力の取得
-            user_input = Prompt.ask("\n[bold green]あなた[/bold green]")
+            with redirect_stderr(stderr_buffer):
+                user_input = Prompt.ask("\n[bold green]あなた[/bold green]")
             
             # 終了コマンドのチェック
             if user_input.lower() in ["exit", "quit", "終了"]:
@@ -887,9 +1228,9 @@ if __name__ == "__main__":
             console.print("[dim]処理中...[/dim]")
             
             # 警告出力を抑制
-            stderr = io.StringIO()
-            with redirect_stderr(stderr):
-                response = ai.generate_response(user_input)
+            with redirect_stderr(stderr_buffer):
+                with redirect_stdout(stdout_buffer):
+                    response = ai.generate_response(user_input)
             
             # 応答を表示
             if user_input.startswith("/") and not ai.memory_candidate:
@@ -912,7 +1253,13 @@ if __name__ == "__main__":
                     console.print(f"\n[bold purple]AI[/bold purple]: {response}")
             
         except KeyboardInterrupt:
+            # エラー出力をクリア
+            stderr_buffer.truncate(0)
+            stderr_buffer.seek(0)
+            stdout_buffer.truncate(0)
+            stdout_buffer.seek(0)
+            
             console.print("\n\n[bold red]プログラムを終了します...[/bold red]")
-            break
+            sys.exit(0)
         except Exception as e:
             console.print(f"\n[bold red]エラーが発生しました:[/bold red] {str(e)}")
