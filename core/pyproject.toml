@@ -14,7 +14,7 @@ dependencies = [
     "langchain",
     "ollama",
     "langchain-community>=0.3.20",
-    "langchain-ollama>=0.2.3",
+    "langchain-ollama==0.2.2",
     "rich>=13.9.4",
     "geocoder>=1.38.1",
     "chromadb>=0.4.18",
@@ -23,6 +23,9 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "olefile>=0.47",
     "pypdf2>=3.0.1",
+    "browser-use==0.1.40",
+    "langchain-openai==0.3.1",
+    "langchain-core>=0.3.46",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
@@ -41,6 +44,8 @@ dev-dependencies = [
 main = { cmd = "python -m core.main" }
 human_follower = { cmd = "python -m core.run_human_follower" }
 slack = { cmd = "python -m core.slack_bot" }
+cli = { cmd = "python -m core.cli" }
+claude_slack = { cmd = "python -m core.claude_slack_bot" }
 
 [tool.hatch.metadata]
 allow-direct-references = true

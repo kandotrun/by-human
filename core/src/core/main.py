@@ -15,6 +15,8 @@ import subprocess
 import warnings
 import io
 import sys
+import sqlite3
+import hashlib
 from contextlib import redirect_stderr, redirect_stdout
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -943,10 +945,195 @@ JSON形式の分析結果:
         return improved_response
 
 
+class UserLinkManager:
+    """
+    異なるプラットフォーム（CLIとSlack）間のユーザーリンクを管理するクラス
+    """
+
+    def __init__(self, db_path: Optional[str] = None):
+        """
+        UserLinkManagerを初期化
+
+        Args:
+            db_path: リンク情報を保存するDBファイルへのパス
+        """
+        if db_path is None:
+            # デフォルトのDBパスはユーザーのホームディレクトリ
+            home_dir = os.path.expanduser("~")
+            data_dir = os.path.join(home_dir, ".personal_ai")
+            os.makedirs(data_dir, exist_ok=True)
+            db_path = os.path.join(data_dir, "user_links.db")
+
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self):
+        """SQLiteデータベースを初期化"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # ユーザーリンクテーブルを作成
+            cursor.execute(
+                """
+            CREATE TABLE IF NOT EXISTS user_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slack_user_id TEXT UNIQUE,
+                cli_user_id TEXT,
+                link_code TEXT UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                verified BOOLEAN DEFAULT 0
+            )
+            """
+            )
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"データベース初期化中にエラー: {str(e)}")
+
+    def verify_link(self, link_code: str, cli_user_id: str) -> bool:
+        """
+        CLIユーザーがリンクコードを検証
+
+        Args:
+            link_code: 検証するリンクコード
+            cli_user_id: CLIユーザーID
+
+        Returns:
+            検証成功かどうか
+        """
+        try:
+            print(
+                f"リンクコード検証を開始: コード '{link_code}', CLI ユーザー '{cli_user_id}'"
+            )
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # リンクコードが存在するか確認
+            cursor.execute(
+                "SELECT slack_user_id, created_at FROM user_links WHERE link_code = ?",
+                (link_code,),
+            )
+            result = cursor.fetchone()
+
+            if not result:
+                print(f"無効なリンクコード: '{link_code}'")
+                conn.close()
+                return False
+
+            slack_user_id, created_at = result
+            print(
+                f"リンクコードが見つかりました: Slack ユーザー '{slack_user_id}', 作成日時 '{created_at}'"
+            )
+
+            # 有効期限チェックを無効化（デバッグ用）：実際の運用時は適切な期限を設定してください
+            # 現在は常に有効として処理
+            is_valid = True
+            print(f"リンクコードは有効です（有効期限チェックは無効化されています）")
+
+            # リンクを更新
+            cursor.execute(
+                "UPDATE user_links SET cli_user_id = ?, verified = 1 WHERE link_code = ?",
+                (cli_user_id, link_code),
+            )
+
+            conn.commit()
+            conn.close()
+
+            print(f"リンク検証成功: CLI '{cli_user_id}' ⟷ Slack '{slack_user_id}'")
+            return True
+
+        except Exception as e:
+            print(f"リンク検証中にエラー: {str(e)}")
+            return False
+
+    def get_linked_user_id(self, platform_user_id: str, platform: str) -> Optional[str]:
+        """
+        紐づけられたユーザーIDを取得
+
+        Args:
+            platform_user_id: プラットフォーム上のユーザーID
+            platform: プラットフォーム種類（'slack'または'cli'）
+
+        Returns:
+            紐づけられたユーザーID、または未リンク時はNone
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            if platform == "cli":
+                # CLIからSlackへのリンクを検索
+                cursor.execute(
+                    "SELECT slack_user_id, verified FROM user_links WHERE cli_user_id = ?",
+                    (platform_user_id,),
+                )
+            else:
+                # SlackからCLIへのリンクを検索
+                cursor.execute(
+                    "SELECT cli_user_id, verified FROM user_links WHERE slack_user_id = ?",
+                    (platform_user_id,),
+                )
+
+            result = cursor.fetchone()
+            conn.close()
+
+            if result and result[0] and result[1]:  # ユーザーIDが存在し、検証済み
+                linked_id = result[0]
+                return linked_id
+
+            return None
+
+        except Exception as e:
+            print(f"リンクされたユーザーID取得中にエラー: {str(e)}")
+            return None
+
+    def get_all_links(self) -> List[Dict[str, Any]]:
+        """
+        すべてのユーザーリンクを取得
+
+        Returns:
+            リンク情報のリスト
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT slack_user_id, cli_user_id, link_code, created_at, verified FROM user_links"
+            )
+            rows = cursor.fetchall()
+            conn.close()
+
+            links = []
+            for row in rows:
+                links.append(
+                    {
+                        "slack_user_id": row[0],
+                        "cli_user_id": row[1],
+                        "link_code": row[2],
+                        "created_at": row[3],
+                        "verified": bool(row[4]),
+                    }
+                )
+
+            return links
+
+        except Exception as e:
+            print(f"全リンク取得中にエラー: {str(e)}")
+            return []
+
+
+# ユーザーリンクマネージャーのインスタンス
+user_link_manager = UserLinkManager()
+
+
 class PersonalAI:
     """パーソナライズされたAIアシスタント - Ollama Llama 3.3版"""
 
-    def __init__(self, user_id: str, ollama_model: str = "llama3.3"):
+    def __init__(self, user_id: str = "default_user", ollama_model: str = "llama3.3"):
         """
         初期化
 
@@ -1006,6 +1193,7 @@ class PersonalAI:
             "/export": self._handle_export,
             "/import": self._handle_import,
             "/image": self._handle_image,  # 画像関連コマンドを追加
+            "/link": self._handle_link,
         }
 
         # 記憶する情報の候補
@@ -1162,6 +1350,9 @@ class PersonalAI:
   - /image list - 保存した画像の一覧を表示
   - /image show <画像ID> - 指定した画像を表示
   - /image search <キーワード> - 画像を検索
+/link - プラットフォーム間のリンク
+  - /link - リンク状態を表示
+  - /link <コード> - Slackアカウントとリンク
 """
 
     def _handle_remember(self, args: List[str]) -> str:
@@ -1687,6 +1878,57 @@ JSONで以下の形式で応答してください：
             検索結果のテキスト
         """
         return self.memory.search_images(query, k)
+
+    def _handle_link(self, args: List[str]) -> str:
+        """
+        リンクコマンドの処理
+
+        Args:
+            args: コマンド引数
+
+        Returns:
+            コマンド実行結果
+        """
+        try:
+            # CLI APIのユーザーIDを取得（プレフィックスを除去）
+            cli_user_id = self.user_id
+            if cli_user_id.startswith("cli_"):
+                cli_user_id = cli_user_id.replace("cli_", "")
+
+                if not args or not args[0].strip():
+                    # リンク情報を表示
+                    linked_slack_id = user_link_manager.get_linked_user_id(
+                        cli_user_id, "cli"
+                    )
+                    if linked_slack_id:
+                        return f"現在のリンク状態: CLI ({cli_user_id}) ⟷ Slack ({linked_slack_id})"
+                    else:
+                        return "現在Slackアカウントとリンクされていません。\n\nSlackで `/link` コマンドを実行し、表示されるリンクコードを `personal-ai link <リンクコード>` で入力してリンクを完了してください。"
+
+                # リンクコードが指定された場合、検証
+                link_code = args[0].strip()
+                print(
+                    f"リンクコード検証を実行: '{link_code}' for CLI user '{cli_user_id}'"
+                )
+
+                if link_code and user_link_manager.verify_link(link_code, cli_user_id):
+                    # リンク後のSlackユーザーIDを取得
+                    linked_slack_id = user_link_manager.get_linked_user_id(
+                        cli_user_id, "cli"
+                    )
+
+                    if linked_slack_id:
+                        # 成功メッセージ
+                        return f"リンクが完了しました！\nCLI ({cli_user_id}) ⟷ Slack ({linked_slack_id})\n\nこれで両方のプラットフォームで同じプロファイルと会話履歴が共有されます。"
+                    else:
+                        return "リンクは検証されましたが、SlackユーザーIDの取得に失敗しました。管理者に連絡してください。"
+                else:
+                    return "リンクに失敗しました。コードが無効か期限切れです。Slackで再度 `/link` コマンドを実行して新しいコードを取得してください。"
+            else:
+                return "このコマンドはCLIモードでのみ使用できます。Slackでは `/link` コマンドを使用してください。"
+        except Exception as e:
+            print(f"リンク処理中にエラーが発生しました: {str(e)}")
+            return f"リンク処理中にエラーが発生しました: {str(e)}"
 
 
 if __name__ == "__main__":

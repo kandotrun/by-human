@@ -24,6 +24,23 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from PIL import Image
 import io
 import ollama  # ollamaライブラリを追加
+import asyncio
+from functools import partial
+import sqlite3
+import hashlib
+
+# browser-use関連のインポート（インストールされている場合のみ）
+BROWSER_USE_AVAILABLE = False
+try:
+    from browser_use import Agent as BrowserAgent
+    from langchain_ollama import ChatOllama
+    from playwright.sync_api import sync_playwright
+    from langchain.chains import LLMChain
+    from langchain.prompts import PromptTemplate
+
+    BROWSER_USE_AVAILABLE = True
+except ImportError:
+    pass
 
 try:
     import PyPDF2
@@ -61,6 +78,742 @@ FALLBACK_IMAGE_MODELS = ["llava", "bakllava", "llava:latest"]
 # Slackアプリの初期化
 app = App(token=SLACK_BOT_TOKEN)
 
+
+# Canvasメモ帳に関するスラッシュコマンドハンドラ
+@app.command("/memo")
+def handle_memo_command(ack, body, logger, say):
+    """
+    /memo スラッシュコマンドを処理する
+
+    Args:
+        ack: 受信確認
+        body: リクエストボディ
+        logger: ロガー
+        say: メッセージ送信関数
+    """
+    # コマンドを確認応答
+    ack()
+
+    logger.info(f"スラッシュコマンド /memo を受信: {body}")
+
+    # ユーザーIDを取得
+    user_id = body["user_id"]
+
+    # チャンネルIDを取得
+    channel_id = body["channel_id"]
+
+    # スレッドタイムスタンプを取得（もし存在すれば）
+    thread_ts = body.get("thread_ts")
+
+    # コマンドテキストを取得
+    text = body.get("text", "").strip()
+
+    # コマンド引数をパース
+    args = text.split()
+
+    # AIインスタンスを取得
+    ai = get_ai_for_user(user_id)
+
+    # サブコマンドの処理
+    if len(args) > 0 and args[0] in ["list", "リスト", "一覧"]:
+        # Canvas一覧表示
+        list_canvases_for_user(user_id, channel_id, thread_ts, say)
+    elif len(args) > 0 and args[0] in ["update", "更新", "編集"]:
+        # 既存Canvas更新
+        if len(args) < 2:
+            say(
+                text="使用法: /memo update <キャンバスID> [内容]",
+                thread_ts=thread_ts,
+                channel=channel_id,
+            )
+        else:
+            canvas_id = args[1]
+            content = " ".join(args[2:]) if len(args) > 2 else ""
+            update_canvas_for_user(
+                user_id, channel_id, canvas_id, content, thread_ts, say
+            )
+    elif len(args) > 0 and args[0] in ["history", "履歴"]:
+        # Canvas履歴表示
+        if len(args) < 2:
+            say(
+                text="使用法: /memo history <キャンバスID>",
+                thread_ts=thread_ts,
+                channel=channel_id,
+            )
+        else:
+            canvas_id = args[1]
+            show_canvas_history(user_id, channel_id, canvas_id, thread_ts, say)
+    else:
+        # 新規Canvas作成
+        create_canvas_for_user(user_id, channel_id, text, thread_ts, say)
+
+
+def create_canvas_for_user(user_id, channel_id, title_text, thread_ts, say):
+    """
+    ユーザー用のCanvasを作成する
+
+    Args:
+        user_id: Slackユーザー ID
+        channel_id: チャンネルID
+        title_text: タイトルテキスト（空の場合はデフォルトを使用）
+        thread_ts: スレッドタイムスタンプ
+        say: 応答関数
+    """
+    from slack_sdk.web import WebClient
+
+    client = WebClient(token=SLACK_BOT_TOKEN)
+
+    # タイトルが空の場合のデフォルト
+    title = title_text if title_text else "共同編集メモ帳"
+
+    try:
+        # Canvasを作成
+        canvas_response = client.conversations_canvases_create(
+            channel_id=channel_id,
+            document_content={
+                "type": "markdown",
+                "markdown": f"# {title}\n\n## メモの内容\n\nここに内容を入力してください。AIが必要に応じてサポートします。\n\n## AIへの指示\n\nここにAIへの指示を入力してください。",
+            },
+        )
+
+        if canvas_response and canvas_response.get("ok"):
+            canvas_id = canvas_response.get("canvas", {}).get("id")
+            canvas_url = canvas_response.get("canvas", {}).get("permalink")
+
+            # 成功メッセージを送信
+            say(
+                text=f"*共同編集メモ帳を作成しました*\n\n<{canvas_url}|メモ帳を開く>\n\nAIに指示するには、メモ帳の「AIへの指示」セクションに内容を入力してください。",
+                thread_ts=thread_ts,
+                channel=channel_id,
+            )
+
+            # キャンバスIDをユーザーのAIに保存
+            ai = get_ai_for_user(user_id)
+            ai.remember(f"canvas_{canvas_id}", f"ユーザーの共同編集メモ帳: {title}")
+
+            logger.info(f"ユーザー {user_id} にCanvas {canvas_id} を作成しました")
+        else:
+            error_message = canvas_response.get("error", "不明なエラー")
+            logger.error(f"Canvas作成エラー: {error_message}")
+            say(
+                text=f"メモ帳の作成に失敗しました: {error_message}",
+                thread_ts=thread_ts,
+                channel=channel_id,
+            )
+    except Exception as e:
+        logger.error(f"Canvas作成中に例外が発生: {str(e)}", exc_info=True)
+        say(
+            text=f"メモ帳の作成中にエラーが発生しました: {str(e)}",
+            thread_ts=thread_ts,
+            channel=channel_id,
+        )
+
+
+def list_canvases_for_user(user_id, channel_id, thread_ts, say):
+    """
+    ユーザーのCanvas一覧を表示する
+
+    Args:
+        user_id: Slackユーザー ID
+        channel_id: チャンネルID
+        thread_ts: スレッドタイムスタンプ
+        say: 応答関数
+    """
+    from slack_sdk.web import WebClient
+
+    client = WebClient(token=SLACK_BOT_TOKEN)
+
+    try:
+        # Canvasの一覧を取得 (files.listメソッドをtypes=canvasフィルタで使用)
+        files_response = client.files_list(types="canvas", channel=channel_id)
+
+        if files_response and files_response.get("ok"):
+            canvases = files_response.get("files", [])
+
+            if canvases:
+                # Canvas一覧の表示形式を整形
+                canvas_list = []
+                for canvas in canvases:
+                    canvas_id = canvas.get("id")
+                    canvas_title = canvas.get("title", "無題")
+                    canvas_url = canvas.get("permalink")
+                    canvas_created = datetime.fromtimestamp(
+                        float(canvas.get("created", 0))
+                    ).strftime("%Y-%m-%d %H:%M")
+
+                    canvas_list.append(
+                        f"• <{canvas_url}|{canvas_title}> (ID: {canvas_id}, 作成: {canvas_created})"
+                    )
+
+                canvas_list_text = "\n".join(canvas_list)
+                say(
+                    text=f"*利用可能なメモ帳一覧*\n\n{canvas_list_text}\n\n更新するには: `/memo update <キャンバスID> [内容]`\n履歴を見るには: `/memo history <キャンバスID>`",
+                    thread_ts=thread_ts,
+                    channel=channel_id,
+                )
+            else:
+                say(
+                    text="このチャンネルに共有されているメモ帳はありません。\n\n新しいメモ帳を作成するには: `/memo [タイトル]`",
+                    thread_ts=thread_ts,
+                    channel=channel_id,
+                )
+        else:
+            error_message = files_response.get("error", "不明なエラー")
+            logger.error(f"Canvas一覧取得エラー: {error_message}")
+            say(
+                text=f"メモ帳一覧の取得に失敗しました: {error_message}",
+                thread_ts=thread_ts,
+                channel=channel_id,
+            )
+    except Exception as e:
+        logger.error(f"Canvas一覧取得中に例外が発生: {str(e)}", exc_info=True)
+        say(
+            text=f"メモ帳一覧の取得中にエラーが発生しました: {str(e)}",
+            thread_ts=thread_ts,
+            channel=channel_id,
+        )
+
+
+def update_canvas_for_user(user_id, channel_id, canvas_id, content, thread_ts, say):
+    """
+    ユーザーのCanvasを更新する
+
+    Args:
+        user_id: Slackユーザー ID
+        channel_id: チャンネルID
+        canvas_id: 更新対象のCanvasのID
+        content: 追加する内容
+        thread_ts: スレッドタイムスタンプ
+        say: 応答関数
+    """
+    from slack_sdk.web import WebClient
+
+    client = WebClient(token=SLACK_BOT_TOKEN)
+
+    try:
+        # 現在のAIインスタンスからの情報取得
+        ai = get_ai_for_user(user_id)
+
+        # Canvas情報を取得
+        canvas_response = client.canvases_get(canvas_id=canvas_id)
+
+        if canvas_response and canvas_response.get("ok"):
+            # 内容が空の場合は、AIに応答を生成させる
+            if not content:
+                # Canvas内容を取得
+                canvas_content = (
+                    canvas_response.get("canvas", {})
+                    .get("document_content", {})
+                    .get("markdown", "")
+                )
+
+                # AIからの回答を生成
+                ai_response = ai.chat(
+                    f"以下はSlackのCanvasで共有されているメモ帳の内容です。この内容に対して補足や追加をしてください。:\n\n{canvas_content}"
+                )
+
+                # 更新用の内容を設定
+                content = ai_response
+
+            # ユーザー名を取得
+            user_info = client.users_info(user=user_id)
+            user_name = user_info.get("user", {}).get("real_name", "ユーザー")
+
+            # Canvas更新用の内容を整形
+            formatted_content = f"\n\n## {user_name}の追加 ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n\n{content}"
+
+            # Canvasを更新
+            update_response = client.canvases_edit(
+                canvas_id=canvas_id,
+                changes=[
+                    {
+                        "operation": "append",
+                        "document_content": {
+                            "type": "markdown",
+                            "markdown": formatted_content,
+                        },
+                    }
+                ],
+            )
+
+            if update_response and update_response.get("ok"):
+                canvas_url = canvas_response.get("canvas", {}).get("permalink")
+                say(
+                    text=f"*メモ帳を更新しました*\n\n<{canvas_url}|メモ帳を開く>",
+                    thread_ts=thread_ts,
+                    channel=channel_id,
+                )
+
+                logger.info(f"ユーザー {user_id} がCanvas {canvas_id} を更新しました")
+            else:
+                error_message = update_response.get("error", "不明なエラー")
+                logger.error(f"Canvas更新エラー: {error_message}")
+                say(
+                    text=f"メモ帳の更新に失敗しました: {error_message}",
+                    thread_ts=thread_ts,
+                    channel=channel_id,
+                )
+        else:
+            error_message = canvas_response.get("error", "不明なエラー")
+            logger.error(f"Canvas取得エラー: {error_message}")
+            say(
+                text=f"メモ帳の取得に失敗しました: {error_message}",
+                thread_ts=thread_ts,
+                channel=channel_id,
+            )
+    except Exception as e:
+        logger.error(f"Canvas更新中に例外が発生: {str(e)}", exc_info=True)
+        say(
+            text=f"メモ帳の更新中にエラーが発生しました: {str(e)}",
+            thread_ts=thread_ts,
+            channel=channel_id,
+        )
+
+
+def show_canvas_history(user_id, channel_id, canvas_id, thread_ts, say):
+    """
+    Canvas編集履歴を表示する
+
+    Args:
+        user_id: Slackユーザー ID
+        channel_id: チャンネルID
+        canvas_id: 対象のCanvasのID
+        thread_ts: スレッドタイムスタンプ
+        say: 応答関数
+    """
+    from slack_sdk.web import WebClient
+
+    client = WebClient(token=SLACK_BOT_TOKEN)
+
+    try:
+        # Canvas情報を取得
+        canvas_response = client.canvases_get(canvas_id=canvas_id)
+
+        if canvas_response and canvas_response.get("ok"):
+            canvas_title = canvas_response.get("canvas", {}).get("title", "無題")
+            canvas_content = (
+                canvas_response.get("canvas", {})
+                .get("document_content", {})
+                .get("markdown", "")
+            )
+            canvas_url = canvas_response.get("canvas", {}).get("permalink")
+
+            # 編集履歴を抽出 (##で始まるセクションを検索)
+            history_sections = []
+            lines = canvas_content.split("\n")
+
+            current_section = None
+            for line in lines:
+                if line.startswith("## ") and ("追加" in line or "回答" in line):
+                    # 新しいセクションの開始
+                    if current_section:
+                        history_sections.append(current_section)
+                    current_section = {"heading": line, "content": []}
+                elif current_section:
+                    # 現在のセクションに内容を追加
+                    current_section["content"].append(line)
+
+            # 最後のセクションを追加
+            if current_section:
+                history_sections.append(current_section)
+
+            # 履歴を整形
+            if history_sections:
+                history_text = []
+                for section in history_sections:
+                    heading = section["heading"].replace("##", "").strip()
+                    content_preview = "\n".join(section["content"][:3])
+                    if len(section["content"]) > 3:
+                        content_preview += "\n..."
+                    history_text.append(f"• *{heading}*\n```\n{content_preview}\n```")
+
+                history_formatted = "\n\n".join(history_text)
+                say(
+                    text=f"*メモ帳「{canvas_title}」の編集履歴*\n\n{history_formatted}\n\n<{canvas_url}|メモ帳を開く>",
+                    thread_ts=thread_ts,
+                    channel=channel_id,
+                )
+            else:
+                say(
+                    text=f"*メモ帳「{canvas_title}」の編集履歴*\n\nこのメモ帳にはまだ編集履歴がありません。\n\n<{canvas_url}|メモ帳を開く>",
+                    thread_ts=thread_ts,
+                    channel=channel_id,
+                )
+        else:
+            error_message = canvas_response.get("error", "不明なエラー")
+            logger.error(f"Canvas取得エラー: {error_message}")
+            say(
+                text=f"メモ帳の取得に失敗しました: {error_message}",
+                thread_ts=thread_ts,
+                channel=channel_id,
+            )
+    except Exception as e:
+        logger.error(f"Canvas履歴取得中に例外が発生: {str(e)}", exc_info=True)
+        say(
+            text=f"メモ帳の履歴取得中にエラーが発生しました: {str(e)}",
+            thread_ts=thread_ts,
+            channel=channel_id,
+        )
+
+
+@app.event("canvas_mention")
+def handle_canvas_mention(body, logger, say):
+    """
+    Canvasでのメンションイベントを処理する
+
+    Args:
+        body: イベントボディ
+        logger: ロガー
+        say: メッセージ送信関数
+    """
+    try:
+        event = body["event"]
+        user_id = event["user"]
+        canvas_id = event.get("canvas", {}).get("id")
+        canvas_text = event.get("text", "")
+
+        logger.info(
+            f"Canvas内でのメンション検出: ユーザー {user_id}, キャンバス {canvas_id}"
+        )
+
+        # AIインスタンスを取得
+        ai = get_ai_for_user(user_id)
+
+        # Canvas内容を取得
+        from slack_sdk.web import WebClient
+
+        client = WebClient(token=SLACK_BOT_TOKEN)
+
+        canvas_response = client.canvases_get(canvas_id=canvas_id)
+
+        if canvas_response and canvas_response.get("ok"):
+            canvas_content = (
+                canvas_response.get("canvas", {})
+                .get("document_content", {})
+                .get("markdown", "")
+            )
+
+            # AIに指示セクションを検索
+            instruction_section = None
+            content_sections = canvas_content.split("## AIへの指示")
+
+            if len(content_sections) > 1:
+                instruction_section = content_sections[1].strip()
+
+            if instruction_section:
+                # AIからの回答を生成
+                ai_response = ai.chat(
+                    f"以下はSlackのCanvasで共有されているメモ帳の内容です。'AIへの指示'セクションに書かれた内容に対して応答してください。メモ全体：\n\n{canvas_content}"
+                )
+
+                # Canvas更新用の回答を整形
+                formatted_response = f"\n\n## AIからの回答 ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n\n{ai_response}"
+
+                # Canvasを更新
+                update_response = client.canvases_edit(
+                    canvas_id=canvas_id,
+                    changes=[
+                        {
+                            "operation": "append",
+                            "document_content": {
+                                "type": "markdown",
+                                "markdown": formatted_response,
+                            },
+                        }
+                    ],
+                )
+
+                if not update_response or not update_response.get("ok"):
+                    error_message = update_response.get("error", "不明なエラー")
+                    logger.error(f"Canvas更新エラー: {error_message}")
+            else:
+                logger.warning(
+                    f"AIへの指示セクションが見つかりませんでした: {canvas_id}"
+                )
+        else:
+            logger.error(
+                f"Canvasの取得に失敗: {canvas_response.get('error', '不明なエラー')}"
+            )
+
+    except Exception as e:
+        logger.error(f"Canvas処理中に例外が発生: {str(e)}", exc_info=True)
+
+
+# スラッシュコマンドハンドラ
+@app.command("/link")
+def handle_link_command(ack, body, logger, say):
+    """
+    /link スラッシュコマンドを処理する
+
+    Args:
+        ack: 受信確認
+        body: リクエストボディ
+        logger: ロガー
+        say: メッセージ送信関数
+    """
+    # コマンドを確認応答
+    ack()
+
+    logger.info(f"スラッシュコマンド /link を受信: {body}")
+
+    # ユーザーIDを取得
+    user_id = body["user_id"]
+
+    # チャンネルIDを取得
+    channel_id = body["channel_id"]
+
+    # スレッドタイムスタンプを取得（もし存在すれば）
+    thread_ts = body.get("thread_ts")
+
+    # AIインスタンスを取得
+    ai = get_ai_for_user(user_id)
+
+    # リンクコードを生成
+    link_code = user_link_manager.generate_link_code(user_id)
+
+    # コマンドラインツール用の使い方を表示
+    cli_command = f"personal-ai link {link_code}"
+
+    # プライベートレスポンスとして送信（他のユーザーには見えない）
+    say(
+        text=f"*CLIとSlackアカウントのリンク*\n\nCLIアプリケーションで次のコマンドを実行してリンクを完了してください:\n```\n{cli_command}\n```\n\nこのリンクコードは現在無期限で有効です（テスト中）。",
+        thread_ts=thread_ts,
+        channel=channel_id,
+        user=user_id,
+        response_type="ephemeral",  # プライベートレスポンス
+    )
+
+    logger.info(f"ユーザー {user_id} にリンクコード {link_code} を生成しました")
+
+
+# ユーザーリンク管理クラス
+class UserLinkManager:
+    """
+    異なるプラットフォーム（SlackとCLI）間のユーザーリンクを管理するクラス
+    """
+
+    def __init__(self, db_path: Optional[str] = None):
+        """
+        UserLinkManagerを初期化
+
+        Args:
+            db_path: リンク情報を保存するDBファイルへのパス
+        """
+        if db_path is None:
+            # デフォルトのDBパスはユーザーのホームディレクトリ
+            home_dir = os.path.expanduser("~")
+            data_dir = os.path.join(home_dir, ".personal_ai")
+            os.makedirs(data_dir, exist_ok=True)
+            db_path = os.path.join(data_dir, "user_links.db")
+
+        self.db_path = db_path
+        self._init_db()
+        logger.info(f"ユーザーリンクマネージャーを初期化しました: {db_path}")
+
+    def _init_db(self):
+        """SQLiteデータベースを初期化"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # ユーザーリンクテーブルを作成
+            cursor.execute(
+                """
+            CREATE TABLE IF NOT EXISTS user_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slack_user_id TEXT UNIQUE,
+                cli_user_id TEXT,
+                link_code TEXT UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                verified BOOLEAN DEFAULT 0
+            )
+            """
+            )
+
+            conn.commit()
+            conn.close()
+            logger.debug("ユーザーリンクデータベースを初期化しました")
+        except Exception as e:
+            logger.error(f"データベース初期化中にエラー: {str(e)}", exc_info=True)
+
+    def generate_link_code(self, slack_user_id: str) -> str:
+        """
+        Slackユーザー用のリンクコードを生成
+
+        Args:
+            slack_user_id: SlackユーザーID
+
+        Returns:
+            生成されたリンクコード
+        """
+        try:
+            # ランダムなリンクコードを生成
+            random_bytes = os.urandom(6)  # 6バイト = 12文字の16進数
+            link_code = hashlib.sha256(
+                random_bytes + slack_user_id.encode()
+            ).hexdigest()[:12]
+
+            # データベースに保存
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # 既存のエントリがあるか確認
+            cursor.execute(
+                "SELECT id FROM user_links WHERE slack_user_id = ?", (slack_user_id,)
+            )
+            existing = cursor.fetchone()
+
+            if existing:
+                # 既存のエントリを更新
+                cursor.execute(
+                    "UPDATE user_links SET link_code = ?, verified = 0 WHERE slack_user_id = ?",
+                    (link_code, slack_user_id),
+                )
+            else:
+                # 新しいエントリを作成
+                cursor.execute(
+                    "INSERT INTO user_links (slack_user_id, link_code) VALUES (?, ?)",
+                    (slack_user_id, link_code),
+                )
+
+            conn.commit()
+            conn.close()
+            logger.info(f"リンクコードを生成しました: {slack_user_id} -> {link_code}")
+            return link_code
+
+        except Exception as e:
+            logger.error(f"リンクコード生成中にエラー: {str(e)}", exc_info=True)
+            return "エラー"
+
+    def verify_link(self, link_code: str, cli_user_id: str) -> bool:
+        """
+        CLIユーザーがリンクコードを検証
+
+        Args:
+            link_code: 検証するリンクコード
+            cli_user_id: CLIユーザーID
+
+        Returns:
+            検証成功かどうか
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # リンクコードを検索
+            cursor.execute(
+                "SELECT slack_user_id FROM user_links WHERE link_code = ?", (link_code,)
+            )
+            result = cursor.fetchone()
+
+            if not result:
+                logger.warning(f"無効なリンクコード: {link_code}")
+                conn.close()
+                return False
+
+            slack_user_id = result[0]
+
+            # リンクを更新
+            cursor.execute(
+                "UPDATE user_links SET cli_user_id = ?, verified = 1 WHERE link_code = ?",
+                (cli_user_id, link_code),
+            )
+
+            conn.commit()
+            conn.close()
+
+            logger.info(f"リンク検証成功: CLI {cli_user_id} ⟷ Slack {slack_user_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"リンク検証中にエラー: {str(e)}", exc_info=True)
+            return False
+
+    def get_linked_user_id(self, platform_user_id: str, platform: str) -> Optional[str]:
+        """
+        紐づけられたユーザーIDを取得
+
+        Args:
+            platform_user_id: プラットフォーム上のユーザーID
+            platform: プラットフォーム種類（'slack'または'cli'）
+
+        Returns:
+            紐づけられたユーザーID、または未リンク時はNone
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            if platform == "slack":
+                # SlackからCLIへのリンクを検索
+                cursor.execute(
+                    "SELECT cli_user_id, verified FROM user_links WHERE slack_user_id = ?",
+                    (platform_user_id,),
+                )
+            else:
+                # CLIからSlackへのリンクを検索
+                cursor.execute(
+                    "SELECT slack_user_id, verified FROM user_links WHERE cli_user_id = ?",
+                    (platform_user_id,),
+                )
+
+            result = cursor.fetchone()
+            conn.close()
+
+            if result and result[0] and result[1]:  # ユーザーIDが存在し、検証済み
+                linked_id = result[0]
+                logger.debug(
+                    f"リンクされたユーザーID: {platform} {platform_user_id} -> {linked_id}"
+                )
+                return linked_id
+
+            return None
+
+        except Exception as e:
+            logger.error(
+                f"リンクされたユーザーID取得中にエラー: {str(e)}", exc_info=True
+            )
+            return None
+
+    def get_all_links(self) -> List[Dict[str, Any]]:
+        """
+        すべてのユーザーリンクを取得
+
+        Returns:
+            リンク情報のリスト
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT slack_user_id, cli_user_id, link_code, created_at, verified FROM user_links"
+            )
+            rows = cursor.fetchall()
+            conn.close()
+
+            links = []
+            for row in rows:
+                links.append(
+                    {
+                        "slack_user_id": row[0],
+                        "cli_user_id": row[1],
+                        "link_code": row[2],
+                        "created_at": row[3],
+                        "verified": bool(row[4]),
+                    }
+                )
+
+            return links
+
+        except Exception as e:
+            logger.error(f"全リンク取得中にエラー: {str(e)}", exc_info=True)
+            return []
+
+
+# ユーザーリンクマネージャーのインスタンス
+user_link_manager = UserLinkManager()
+
 # ユーザーごとのAIインスタンスを保持する辞書
 user_ai_instances: Dict[str, PersonalAI] = {}
 
@@ -76,12 +829,18 @@ def get_ai_for_user(user_id: str) -> PersonalAI:
         ユーザー専用のPersonalAIインスタンス
     """
     if user_id not in user_ai_instances:
+        # リンクされたCLIユーザーIDがあるか確認
+        cli_user_id = user_link_manager.get_linked_user_id(user_id, "slack")
+
+        # リンクされたCLIユーザーIDがあれば、そのIDを使用
+        actual_user_id = f"cli_{cli_user_id}" if cli_user_id else f"slack_{user_id}"
+
         # 新しいAIインスタンスを作成
         logger.info(
-            f"ユーザー {user_id} の新しいAIインスタンスを作成します (モデル: {OLLAMA_MODEL})"
+            f"ユーザー {user_id} の新しいAIインスタンスを作成します (モデル: {OLLAMA_MODEL}, 使用ID: {actual_user_id})"
         )
         user_ai_instances[user_id] = PersonalAI(
-            user_id=f"slack_{user_id}", ollama_model=OLLAMA_MODEL
+            user_id=actual_user_id, ollama_model=OLLAMA_MODEL
         )
         logger.info(f"ユーザー {user_id} のAIインスタンス作成完了")
     else:
@@ -134,18 +893,61 @@ def format_command_result(result: str) -> str:
     return result
 
 
-def handle_help_command(ai_instance: PersonalAI) -> str:
+def handle_help_command(ai: PersonalAI) -> str:
     """
-    ヘルプコマンドの処理
+    ヘルプメッセージを生成する
 
     Args:
-        ai_instance: PersonalAIインスタンス
+        ai: PersonalAIインスタンス
 
     Returns:
         ヘルプメッセージ
     """
-    help_text = ai_instance._handle_help([])
-    return f"*使い方* \n{help_text}\n*注意*: コマンドは '/' から始めるか、'!'から始めてください。"
+    commands = [
+        "*基本コマンド*",
+        "• `/help` または `!help` - このヘルプを表示",
+        "• `/remember <キー> <値>` - 情報を記憶する",
+        "• `/forget <キー>` - 情報を忘れる",
+        "• `/profile` - あなたの記憶済み情報を表示",
+        "• `/search <検索語>` - 記憶や会話履歴を検索",
+        "• `/settings` - 設定を表示",
+        "• `/continue` - 会話を継続",
+        "",
+        "*機能コマンド*",
+        "• `/image list` - 保存された画像の一覧を表示",
+        "• `/image show <ID>` - 指定したIDの画像を表示",
+        "• `/image search <キーワード>` - 画像をキーワードで検索",
+        "",
+        "*メモ帳機能*",
+        "• `/memo <タイトル>` - 指定したタイトルの共同編集メモ帳を作成",
+        "• `/memo list` - 現在のチャンネルで利用可能なメモ帳一覧を表示",
+        "• `/memo update <ID> <内容>` - 既存のメモ帳を更新（内容省略時はAIが自動で補足）",
+        "• `/memo history <ID>` - メモ帳の編集履歴を表示",
+        "",
+        "*高度な機能*",
+    ]
+
+    if BROWSER_USE_AVAILABLE:
+        commands.append("• `/browser <タスク>` - ウェブブラウザを使ったタスクを実行")
+
+    commands.append("")
+    commands.append("通常の会話では、質問や指示を直接入力するだけで応答します。")
+    commands.append("")
+    commands.append("*ファイル対応*")
+    commands.append("• 画像: 画像ファイルを添付すると内容の説明や分析を行います")
+
+    if PDF_SUPPORT:
+        commands.append(
+            "• PDF: PDFファイルを添付するとテキスト抽出して内容を分析します"
+        )
+
+    commands.append("• CSV: CSVファイルを添付するとデータ分析を行います")
+    commands.append("")
+    commands.append(
+        "より詳しいヘルプが必要な場合は、「コマンドの詳しい使い方を教えて」と質問してください。"
+    )
+
+    return "\n".join(commands)
 
 
 def download_file(url: str, token: str, filename: str = None) -> Tuple[str, str]:
@@ -251,6 +1053,47 @@ def download_file(url: str, token: str, filename: str = None) -> Tuple[str, str]
     return None, None
 
 
+def get_context_info() -> Dict[str, str]:
+    """
+    現在のコンテキスト情報（日時、曜日など）を取得する
+
+    Returns:
+        コンテキスト情報を含む辞書
+    """
+    now = datetime.now()
+
+    # 日時情報
+    current_date = now.strftime("%Y年%m月%d日")
+    current_time = now.strftime("%H時%M分")
+    current_datetime = f"{current_date} {current_time}"
+
+    # 曜日
+    weekdays = ["月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日", "日曜日"]
+    day_of_week = weekdays[now.weekday()]
+
+    # 位置情報（可能であれば）
+    location_info = "利用不可"
+    try:
+        import geocoder
+
+        g = geocoder.ip("me")
+        if g and g.ok and g.city:
+            location_info = f"{g.city}, {g.state}, {g.country}"
+    except Exception as e:
+        logger.debug(f"位置情報の取得に失敗: {str(e)}")
+
+    context = {
+        "current_date": current_date,
+        "current_time": current_time,
+        "current_datetime": current_datetime,
+        "day_of_week": day_of_week,
+        "location": location_info,
+    }
+
+    logger.debug(f"コンテキスト情報: {context}")
+    return context
+
+
 def analyze_csv_file(file_path: str, prompt: str = None) -> str:
     """
     CSVファイルを解析して内容を要約・説明する
@@ -297,9 +1140,23 @@ CSVファイル概要:
 {stats_info}
 """
 
+        # コンテキスト情報を取得
+        context = get_context_info()
+
         # プロンプトが指定されている場合は、CSVの情報とプロンプトを使ってOllamaに問い合わせ
         if prompt:
             logger.info(f"CSVファイル解析: Ollamaに問い合わせ - {prompt}")
+
+            # コンテキスト情報を含むシステムプロンプトを作成
+            system_prompt = f"""あなたはCSVデータの解析と説明を行うアシスタントです。以下のCSVファイルの情報に基づいて質問に答えてください。
+
+## システム情報
+現在日時: {context['current_datetime']} ({context['day_of_week']})
+現在位置: {context['location']}
+
+## CSVデータ情報
+{csv_info}
+"""
 
             # LLMを使用して解析
             response = ollama.chat(
@@ -307,7 +1164,7 @@ CSVファイル概要:
                 messages=[
                     {
                         "role": "system",
-                        "content": f"あなたはCSVデータの解析と説明を行うアシスタントです。以下のCSVファイルの情報に基づいて質問に答えてください。\n\n{csv_info}",
+                        "content": system_prompt,
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -317,7 +1174,7 @@ CSVファイル概要:
             return result
         else:
             # プロンプトがない場合はCSV情報のみを返す
-            return f"CSVファイルの解析結果:\n\n{csv_info}"
+            return f"CSVファイルの解析結果:\n\n{csv_info}\n\n解析日時: {context['current_datetime']} ({context['day_of_week']})"
 
     except Exception as e:
         logger.error(f"CSVファイル解析エラー: {str(e)}", exc_info=True)
@@ -359,6 +1216,9 @@ def analyze_pdf_file(file_path: str, prompt: str = None) -> str:
             if len(text_content) > 4000:
                 text_content = text_content[:4000] + "...(省略)..."
 
+        # コンテキスト情報を取得
+        context = get_context_info()
+
         # PDF情報をまとめる
         pdf_info = f"""
 PDFファイル概要:
@@ -373,13 +1233,24 @@ PDFファイル概要:
         if prompt:
             logger.info(f"PDFファイル解析: Ollamaに問い合わせ - {prompt}")
 
+            # コンテキスト情報を含むシステムプロンプトを作成
+            system_prompt = f"""あなたはPDFドキュメントの解析と要約を行うアシスタントです。以下のPDFの情報に基づいて質問に答えてください。
+
+## システム情報
+現在日時: {context['current_datetime']} ({context['day_of_week']})
+現在位置: {context['location']}
+
+## PDFドキュメント情報
+{pdf_info}
+"""
+
             # LLMを使用して解析
             response = ollama.chat(
                 model=OLLAMA_MODEL,
                 messages=[
                     {
                         "role": "system",
-                        "content": f"あなたはPDFドキュメントの解析と要約を行うアシスタントです。以下のPDFの情報に基づいて質問に答えてください。\n\n{pdf_info}",
+                        "content": system_prompt,
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -394,7 +1265,7 @@ PDFファイル概要:
                 if len(text_content) > 500
                 else text_content
             )
-            return f"PDFファイルの解析結果:\n\nページ数: {page_count}\n\n内容の一部:\n{short_content}"
+            return f"PDFファイルの解析結果:\n\nページ数: {page_count}\n\n内容の一部:\n{short_content}\n\n解析日時: {context['current_datetime']} ({context['day_of_week']})"
 
     except Exception as e:
         logger.error(f"PDFファイル解析エラー: {str(e)}", exc_info=True)
@@ -415,10 +1286,19 @@ def analyze_image_with_ollama(image_path: str, prompt: str) -> str:
     try:
         logger.info(f"画像解析: Ollamaマルチモーダルモデルを使用 - {prompt}")
 
+        # コンテキスト情報を取得
+        context = get_context_info()
+
         # 画像をbase64エンコード
         with open(image_path, "rb") as img_file:
             image_data = img_file.read()
             base64_image = base64.b64encode(image_data).decode("utf-8")
+
+        # コンテキスト情報を含む拡張プロンプトを作成
+        context_prompt = f"""現在の日時: {context['current_datetime']} ({context['day_of_week']})
+現在の場所: {context['location']}
+
+{prompt}"""
 
         # 使用するモデルを決定（デフォルトモデルが使用できない場合は代替モデルを試行）
         models_to_try = [IMAGE_MODEL] + FALLBACK_IMAGE_MODELS
@@ -432,7 +1312,7 @@ def analyze_image_with_ollama(image_path: str, prompt: str) -> str:
                 # ollama.generate を使用して画像を解析
                 response = ollama.generate(
                     model=model,
-                    prompt=prompt,
+                    prompt=context_prompt,
                     images=[image_path],
                     options={"temperature": 0.7},
                 )
@@ -648,6 +1528,61 @@ def process_and_respond(
             say("わかりました。記憶しません。", thread_ts=thread_ts)
             return
 
+    # リンクコマンド処理
+    if text.startswith("/link"):
+        logger.info(f"リンクコマンド検出: '{text}'")
+        # ユーザーIDを取得
+        user_id = ai.user_id.replace("slack_", "")
+
+        # リンクコードを生成
+        link_code = user_link_manager.generate_link_code(user_id)
+
+        # コマンドラインツール用の使い方を表示
+        cli_command = f"personal-ai link {link_code}"
+
+        say(
+            f"*CLIとSlackアカウントのリンク*\n\nCLIアプリケーションで次のコマンドを実行してリンクを完了してください:\n```\n{cli_command}\n```\n\nこのリンクコードは現在無期限で有効です（テスト中）。",
+            thread_ts=thread_ts,
+        )
+        return
+
+    # browser-useコマンド処理
+    if text.startswith("/browser") or text.startswith("/browse"):
+        logger.info(f"browser-useコマンド検出: '{text}'")
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            say(
+                "使用法: /browser <タスク内容>\n例: /browser OpenAIのウェブサイトにアクセスして最新の情報を取得",
+                thread_ts=thread_ts,
+            )
+            return
+
+        task = parts[1]
+        # チャンネルIDを取得
+        channel_id = None
+        from slack_sdk.web import WebClient
+
+        client = WebClient(token=SLACK_BOT_TOKEN)
+
+        try:
+            # スレッド情報からチャンネルIDを取得
+            if thread_ts:
+                response = client.conversations_replies(
+                    channel="C067RCQEZQX",  # デフォルトチャンネル
+                    ts=thread_ts,
+                )
+                if response and response.get("ok"):
+                    channel_id = response.get("channel")
+        except Exception:
+            channel_id = "C067RCQEZQX"  # デフォルトチャンネル
+
+        # ユーザーIDを取得
+        user_id = ai.user_id.replace("slack_", "")
+
+        # browser-useタスクを実行
+        handle_browser_use(ai, task, user_id, channel_id, thread_ts, say)
+        return
+
     # 画像表示リクエストの処理（優先的に処理）
     if text.startswith("/image") or is_image_request(text):
         logger.info(f"画像リクエスト検出: '{text}'")
@@ -715,6 +1650,80 @@ def process_and_respond(
     logger.info("AI応答を生成します")
     start_time = datetime.now()
     try:
+        # 検索タスクの検出
+        search_keywords = [
+            "検索して",
+            "探して",
+            "調べて",
+            "検索",
+            "探す",
+            "調べる",
+            "search",
+            "find",
+            "look up",
+        ]
+
+        # メッセージに検索キーワードが含まれているか確認
+        is_search_request = any(keyword in text.lower() for keyword in search_keywords)
+
+        if is_search_request:
+            # 検索タスクとして処理
+            logger.info(f"検索リクエスト検出: '{text}'")
+
+            # browser-useが利用可能か実行時に確認
+            browser_use_available = False
+            try:
+                from browser_use import Agent as BrowserAgent
+                from langchain_ollama import ChatOllama
+                from playwright.sync_api import sync_playwright
+                from langchain.chains import LLMChain
+                from langchain.prompts import PromptTemplate
+
+                browser_use_available = True
+                logger.info(
+                    "検索リクエスト: browser-useライブラリが正常にインポートされました"
+                )
+            except ImportError as e:
+                browser_use_available = False
+                error_msg = (
+                    f"検索リクエスト: browser-useのインポートに失敗しました: {str(e)}"
+                )
+                logger.error(error_msg)
+
+            if not browser_use_available:
+                # browser-useが利用できない場合は、通常のAI応答で検索内容について答える
+                logger.info(
+                    "browser-useが利用できないため、通常のAI応答で検索内容について回答します"
+                )
+                search_prompt = f"ユーザーから「{text}」という検索リクエストを受け取りました。browser-useが利用できないため、あなたの知識に基づいて回答してください。"
+                response = ai.generate_response(search_prompt)
+                say(response, thread_ts=thread_ts)
+                return
+
+            # チャンネルIDを取得
+            channel_id = None
+            if thread_ts:
+                try:
+                    from slack_sdk.web import WebClient
+
+                    client = WebClient(token=SLACK_BOT_TOKEN)
+                    response = client.conversations_replies(
+                        channel="C067RCQEZQX",
+                        ts=thread_ts,
+                    )
+                    if response and response.get("ok"):
+                        channel_id = response.get("channel")
+                except Exception:
+                    channel_id = "C067RCQEZQX"
+
+            # ユーザーIDを取得
+            user_id = ai.user_id.replace("slack_", "")
+
+            # 検索タスクを実行
+            search_task = f"以下の内容について検索してください: {text}"
+            handle_browser_use(ai, search_task, user_id, channel_id, thread_ts, say)
+            return
+
         response = ai.generate_response(text)
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
@@ -1580,6 +2589,442 @@ def process_image_request(
             # 画像IDが見つからない場合は一覧を表示
             logger.info("画像IDが見つからないため、画像一覧を表示します")
             return process_image_request(ai, "/image list", say, thread_ts, channel_id)
+
+
+def handle_browser_use(
+    ai: PersonalAI, task: str, user_id: str, channel_id: str, thread_ts: str, say
+):
+    """
+    browser-useを使用してブラウザタスクを実行する
+
+    Args:
+        ai: ユーザーのAIインスタンス
+        task: 実行するタスク内容
+        user_id: ユーザーID
+        channel_id: チャンネルID
+        thread_ts: スレッドID
+        say: 応答関数
+    """
+    # 実行時に必要なライブラリをインポートできるか確認
+    browser_use_available = False
+    try:
+        from browser_use import Agent as BrowserAgent
+        from langchain_ollama import ChatOllama
+        from playwright.sync_api import sync_playwright
+        from langchain.chains import LLMChain
+        from langchain.prompts import PromptTemplate
+
+        browser_use_available = True
+        logger.info("browser-useライブラリが正常にインポートされました")
+
+        # Playwrightが正しくインストールされているか確認
+        try:
+            from playwright.sync_api import sync_playwright
+
+            logger.info("Playwrightがインストールされています")
+
+            # ブラウザがインストールされているか確認
+            with sync_playwright() as playwright:
+                try:
+                    browser = playwright.chromium.launch()
+                    browser.close()
+                    logger.info("Playwrightのブラウザが正常に起動しました")
+                except Exception as browser_error:
+                    logger.warning(
+                        f"Playwrightのブラウザ起動に失敗: {str(browser_error)}"
+                    )
+                    say(
+                        "Playwrightのブラウザがインストールされていないようです。以下のコマンドを実行してください: `rye run playwright install`",
+                        thread_ts=thread_ts,
+                    )
+                    return
+
+        except ImportError as pw_error:
+            logger.error(f"Playwrightのインポートに失敗: {str(pw_error)}")
+            say(
+                "Playwrightがインストールされていないようです。以下のコマンドを実行してください: `rye run playwright install`",
+                thread_ts=thread_ts,
+            )
+            return
+
+    except ImportError as e:
+        error_msg = f"browser-useのインポートに失敗しました: {str(e)}"
+        logger.error(error_msg)
+        say(
+            'browser-useが利用できません。インストールするには: `rye add "browser-use==0.1.40" "langchain-openai==0.3.1" "langchain-ollama==0.2.2"`、そしてPlaywrightのセットアップ: `rye run playwright install`',
+            thread_ts=thread_ts,
+        )
+        return
+
+    if not browser_use_available:
+        say(
+            'browser-useが利用できません。インストールするには: `rye add "browser-use==0.1.40" "langchain-openai==0.3.1" "langchain-ollama==0.2.2"`、そしてPlaywrightのセットアップ: `rye run playwright install`',
+            thread_ts=thread_ts,
+        )
+        return
+
+    try:
+        # 実行中メッセージを送信
+        say(
+            f"🔍 タスク分析を開始します: `{task}`",
+            thread_ts=thread_ts,
+        )
+
+        # グローバル変数を更新して今後の確認をスキップ
+        global BROWSER_USE_AVAILABLE
+        BROWSER_USE_AVAILABLE = True
+
+        # 思考プロセスと結果を保存する変数
+        thought_process = []
+
+        # 実行状況の更新を送信する関数
+        async def status_updater(message, is_thinking=False):
+            prefix = "💭 思考中: " if is_thinking else "🔄 進捗状況: "
+            formatted_message = f"{prefix}{message}"
+            say(formatted_message, thread_ts=thread_ts)
+            # 思考プロセスを記録
+            if is_thinking:
+                thought_process.append(message)
+
+        # タスクをToDoリストに変換する関数
+        async def create_todo_list(task_description):
+            # ToDoリストを生成するためのプロンプト
+            todo_prompt = f"""
+以下のタスクを具体的なToDoリストに分解してください:
+{task_description}
+
+各ステップは具体的で、実行可能な形式にしてください。
+結果として期待されるものも明記してください。
+"""
+            # LLMでToDoリストを生成
+            ollama_llm = ChatOllama(model=OLLAMA_MODEL, temperature=0.3)
+            response = await asyncio.to_thread(
+                lambda: ollama.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "あなたはタスクを具体的なToDoリストに分解するアシスタントです。",
+                        },
+                        {"role": "user", "content": todo_prompt},
+                    ],
+                )
+            )
+
+            todo_list = response["message"]["content"]
+
+            # ToDoリストを表示
+            await status_updater(f"タスク分析結果:\n\n{todo_list}", is_thinking=True)
+            return todo_list
+
+        # 非同期関数でブラウザタスクを実行
+        async def run_browser_task():
+            # コンテキスト情報を取得
+            context = get_context_info()
+
+            # タスクをToDoリストに変換
+            todo_list = await create_todo_list(task)
+            say(f"📋 *計画を立てました*\n\n{todo_list}", thread_ts=thread_ts)
+
+            # タスクにコンテキスト情報を追加
+            enhanced_task = f"""
+現在の日時: {context['current_datetime']} ({context['day_of_week']})
+現在位置: {context['location']}
+
+以下のタスクを実行してください:
+{task}
+
+タスク実行計画:
+{todo_list}
+
+各ステップを実行する際に、以下のフレームワークに従ってください:
+1. 思考: 何をしようとしているか、なぜそれが必要か
+2. 行動: 具体的に何のアクションを取るか
+3. 観察: 行動の結果何が得られたか
+4. 次のステップ: 結果に基づいて次に何をするか
+
+各ステップで思考プロセスを詳細に説明し、段階的に進めてください。
+途中結果を常に報告してください。
+"""
+
+            # 進捗状況を更新
+            await status_updater("タスクの実行を開始します", is_thinking=False)
+
+            # OllamaのLLMを作成
+            ollama_llm = ChatOllama(model=OLLAMA_MODEL, temperature=0.7)
+
+            # カスタムコールバック関数を作成
+            class ThoughtTrackingCallbackHandler:
+                def on_llm_start(self, serialized, prompts, **kwargs):
+                    asyncio.create_task(
+                        status_updater(
+                            "思考プロセスを開始しています...", is_thinking=True
+                        )
+                    )
+
+                def on_llm_end(self, response, **kwargs):
+                    # 思考プロセスを抽出
+                    thought = (
+                        response.generations[0][0].text
+                        if hasattr(response, "generations")
+                        else str(response)
+                    )
+                    # 思考プロセスが長すぎる場合は要約
+                    if len(thought) > 200:
+                        thought = thought[:197] + "..."
+                    asyncio.create_task(status_updater(thought, is_thinking=True))
+
+                def on_tool_start(self, serialized, input_str, **kwargs):
+                    tool_name = serialized.get("name", "不明なツール")
+                    asyncio.create_task(
+                        status_updater(
+                            f"ツール '{tool_name}' を使用: {input_str}",
+                            is_thinking=False,
+                        )
+                    )
+
+                def on_tool_end(self, output, **kwargs):
+                    # 出力が長すぎる場合は要約
+                    if isinstance(output, str) and len(output) > 200:
+                        output = output[:197] + "..."
+                    asyncio.create_task(
+                        status_updater(f"結果: {output}", is_thinking=False)
+                    )
+
+            # BrowserAgentを作成
+            try:
+                # 進捗状況を更新
+                await status_updater(
+                    "エージェントを初期化しています...", is_thinking=False
+                )
+
+                agent = BrowserAgent(
+                    task=enhanced_task,
+                    llm=ollama_llm,
+                )
+
+                # タスク実行開始メッセージ
+                say("🚀 *タスク実行を開始しました*", thread_ts=thread_ts)
+
+                # タスクを実行
+                result = await agent.run()
+
+                # 結果を整形して表示
+                formatted_result = format_browser_result(result, thought_process)
+
+                # 結果のサマリーを生成
+                summary_prompt = f"""
+以下はタスク「{task}」の実行結果です:
+
+{formatted_result}
+
+この結果を簡潔に要約し、重要なポイントをまとめてください。
+タスクの目的が達成されたかどうかも評価してください。
+"""
+
+                await status_updater("結果を要約しています...", is_thinking=True)
+
+                summary_response = ollama.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "あなたはタスク実行結果を要約するアシスタントです。",
+                        },
+                        {"role": "user", "content": summary_prompt},
+                    ],
+                )
+
+                summary = summary_response["message"]["content"]
+
+                # 最終結果を表示
+                say(
+                    f"✅ *タスク完了*\n\n{formatted_result}\n\n📝 *要約*\n\n{summary}",
+                    thread_ts=thread_ts,
+                )
+
+            except Exception as agent_error:
+                error_msg = f"エージェントの実行に失敗しました: {str(agent_error)}"
+                logger.error(error_msg, exc_info=True)
+                say(f"❌ *エラー*\n\n{error_msg}", thread_ts=thread_ts)
+                return
+
+            # 記録ファイルをアップロード
+            try:
+                # 録画ファイルを探す
+                recording_dir = os.path.join(
+                    tempfile.gettempdir(), "browser_use_recordings"
+                )
+                os.makedirs(recording_dir, exist_ok=True)
+                recording_files = []
+                for file in os.listdir(recording_dir):
+                    if file.endswith(".gif") or file.endswith(".mp4"):
+                        recording_files.append(os.path.join(recording_dir, file))
+
+                if recording_files:
+                    # 最新の記録ファイルを使用
+                    recording_files.sort(key=os.path.getmtime, reverse=True)
+                    latest_recording = recording_files[0]
+
+                    # Slackにアップロード
+                    from slack_sdk.web import WebClient
+
+                    client = WebClient(token=SLACK_BOT_TOKEN)
+
+                    await status_updater(
+                        "タスク実行の記録をアップロードしています...", is_thinking=False
+                    )
+
+                    response = client.files_upload_v2(
+                        file=latest_recording,
+                        title=f"タスク実行: {task[:50]}...",
+                        initial_comment="🎬 タスク実行の記録",
+                        thread_ts=thread_ts,
+                        channel=channel_id,
+                    )
+                    logger.info(f"記録のアップロード成功: {response}")
+                else:
+                    say(
+                        "📝 タスク実行の記録が見つかりませんでした。",
+                        thread_ts=thread_ts,
+                    )
+            except Exception as upload_error:
+                logger.error(f"記録のアップロード失敗: {str(upload_error)}")
+                say(
+                    f"⚠️ 記録のアップロードに失敗しました: {str(upload_error)}",
+                    thread_ts=thread_ts,
+                )
+
+            # ユーザーのAIインスタンスに会話を保存
+            ai.save_conversation(
+                f"[browser-use] {task}",
+                f"タスク実行結果: {formatted_result}",
+                None,  # 新しい会話IDを生成
+            )
+
+        # 非同期関数を実行
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(run_browser_task())
+            loop.close()
+        except Exception as loop_error:
+            error_msg = f"非同期処理でエラーが発生しました: {str(loop_error)}"
+            logger.error(error_msg, exc_info=True)
+            say(f"❌ *エラー*\n\n{error_msg}", thread_ts=thread_ts)
+
+    except Exception as e:
+        error_msg = f"タスク実行中にエラーが発生しました: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        say(f"❌ *エラー*\n\n{error_msg}", thread_ts=thread_ts)
+
+
+def format_browser_result(result, thought_process=None):
+    """
+    ブラウザタスクの結果を整形する
+
+    Args:
+        result: ブラウザタスクの実行結果
+        thought_process: 思考プロセスのリスト
+
+    Returns:
+        整形された結果テキスト
+    """
+    try:
+        # 思考プロセスの整形
+        thought_section = ""
+        if thought_process and len(thought_process) > 0:
+            thought_section = "*思考プロセス*\n"
+            for i, thought in enumerate(thought_process):
+                thought_section += f"{i+1}. {thought}\n"
+            thought_section += "\n"
+
+        # 結果が文字列の場合
+        if isinstance(result, str):
+            return f"{thought_section}*結果*\n{result}"
+
+        # AgentHistoryListの場合
+        if hasattr(result, "all_results"):
+            formatted_text = ""
+
+            if thought_section:
+                formatted_text += thought_section
+
+            formatted_text += "*実行結果*\n\n"
+
+            # 実行ステップを収集
+            all_steps = []
+            for i, action in enumerate(result.all_results):
+                step_info = {}
+
+                # アクション情報
+                step_info["index"] = i + 1
+                step_info["content"] = (
+                    action.extracted_content if action.extracted_content else None
+                )
+                step_info["error"] = action.error if action.error else None
+                step_info["success"] = action.success
+
+                all_steps.append(step_info)
+
+            # 成功したステップを表示
+            successful_steps = [
+                step for step in all_steps if step["content"] and not step["error"]
+            ]
+            if successful_steps:
+                formatted_text += "*成功したステップ:*\n"
+                for step in successful_steps:
+                    formatted_text += f"{step['index']}. {step['content']}\n"
+                formatted_text += "\n"
+
+            # エラーステップを表示
+            error_steps = [step for step in all_steps if step["error"]]
+            if error_steps:
+                formatted_text += "*エラーが発生したステップ:*\n"
+                for step in error_steps:
+                    formatted_text += f"{step['index']}. エラー: {step['error']}\n"
+                formatted_text += "\n"
+
+            # モデル出力を処理
+            if hasattr(result, "all_model_outputs") and result.all_model_outputs:
+                formatted_text += "*詳細な出力:*\n"
+                for i, output in enumerate(result.all_model_outputs):
+                    if isinstance(output, dict):
+                        formatted_text += f"ステップ {i+1}:\n"
+                        for key, value in output.items():
+                            if value:
+                                if isinstance(value, dict):
+                                    formatted_text += f"• {key}:\n"
+                                    for k, v in value.items():
+                                        formatted_text += f"  - {k}: {v}\n"
+                                else:
+                                    formatted_text += f"• {key}: {value}\n"
+                        formatted_text += "\n"
+
+            # 収集した情報の要約
+            extracted_info = []
+            for step in all_steps:
+                if step["content"] and isinstance(step["content"], str):
+                    if ":" in step["content"]:
+                        parts = step["content"].split(":", 1)
+                        if len(parts) == 2:
+                            key, value = parts[0].strip(), parts[1].strip()
+                            if key and value and len(value) > 5:  # 有用な情報のみ抽出
+                                extracted_info.append(f"• {key}: {value}")
+
+            if extracted_info:
+                formatted_text += "*収集した情報:*\n"
+                formatted_text += "\n".join(extracted_info)
+                formatted_text += "\n\n"
+
+            return formatted_text
+
+        # その他の型の場合は文字列に変換
+        return f"{thought_section}*結果*\n{str(result)}"
+
+    except Exception as e:
+        logger.error(f"結果の整形中にエラー: {str(e)}")
+        return f"*結果の整形中にエラーが発生しました*\n{str(e)}\n\n*元の結果:*\n{str(result)}"
 
 
 def start_slack_bot():
