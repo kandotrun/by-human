@@ -5,7 +5,12 @@ description = "Add your description here"
 authors = [
     { name = "nnmykn", email = "ninomiya@kan.run" }
 ]
-dependencies = []
+dependencies = [
+    "opencv-python",
+    "numpy",
+    "torch",
+    "ultralytics"
+]
 readme = "README.md"
 requires-python = ">= 3.8"
 
@@ -15,10 +20,17 @@ build-backend = "hatchling.build"
 
 [tool.rye]
 managed = true
-dev-dependencies = []
+dev-dependencies = [
+    "black>=23.1.0"
+]
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/core"]
+
+[tool.black]
+line-length = 88
+target-version = ["py38"]
+include = '\.pyi?$'
