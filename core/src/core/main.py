@@ -282,6 +282,10 @@ class MarkdownMemory:
         self.preferences_file = f"{memory_dir}/{user_id}_preferences.md"
         self.feedback_file = f"{memory_dir}/{user_id}_feedback.md"
         self.satisfaction_file = f"{memory_dir}/{user_id}_satisfaction.md"
+        self.images_dir = f"{memory_dir}/{user_id}_images"  # 画像保存用ディレクトリ
+        self.images_metadata_file = (
+            f"{memory_dir}/{user_id}_images_metadata.md"  # 画像メタデータ保存用ファイル
+        )
 
         # ファイル操作ツール
         self.file_tool = file_tool if file_tool else MarkdownFileTool()
@@ -294,6 +298,7 @@ class MarkdownMemory:
         # ディレクトリが存在しない場合は作成
         os.makedirs(memory_dir, exist_ok=True)
         os.makedirs(self.conversations_dir, exist_ok=True)
+        os.makedirs(self.images_dir, exist_ok=True)  # 画像ディレクトリを作成
 
         # 各ファイルが存在しない場合は作成
         for file_path, header in [
@@ -301,6 +306,10 @@ class MarkdownMemory:
             (self.preferences_file, "# ユーザー設定\n\n"),
             (self.feedback_file, "# フィードバック履歴\n\n"),
             (self.satisfaction_file, "# 満足度履歴\n\n"),
+            (
+                self.images_metadata_file,
+                "# 保存された画像一覧\n\n",
+            ),  # 画像メタデータファイル
         ]:
             if not os.path.exists(file_path):
                 self.file_tool._run("write", file_path, header)
@@ -610,6 +619,159 @@ class MarkdownMemory:
             print(f"記憶の検索に失敗しました: {str(e)}")
             return ""
 
+    def save_image(
+        self, image_path: str, title: str, description: str = "", tags: List[str] = None
+    ) -> str:
+        """
+        画像を保存し、メタデータを記録
+
+        Args:
+            image_path: 元の画像ファイルのパス
+            title: 画像のタイトル
+            description: 画像の説明
+            tags: 画像に関連するタグのリスト
+
+        Returns:
+            保存された画像のID
+        """
+        # 画像IDの生成（タイムスタンプベース）
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        image_id = f"img_{timestamp}"
+
+        # 画像の拡張子を取得
+        _, ext = os.path.splitext(image_path)
+        if not ext:
+            ext = ".jpg"  # デフォルトの拡張子
+
+        # 保存先のパスを決定
+        destination_path = os.path.join(self.images_dir, f"{image_id}{ext}")
+
+        # 画像をコピー
+        import shutil
+
+        try:
+            shutil.copy2(image_path, destination_path)
+        except Exception as e:
+            print(f"画像の保存に失敗しました: {str(e)}")
+            return ""
+
+        # タグの処理
+        tags_str = ", ".join(tags) if tags else ""
+
+        # メタデータをMarkdownファイルに追加
+        content = f"## {image_id} - {title}\n\n"
+        content += f"- **ファイル名**: {os.path.basename(destination_path)}\n"
+        content += (
+            f"- **日時**: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        )
+        if description:
+            content += f"- **説明**: {description}\n"
+        if tags_str:
+            content += f"- **タグ**: {tags_str}\n"
+        content += "\n---\n\n"
+
+        # メタデータを保存
+        self.file_tool._run("append", self.images_metadata_file, content)
+
+        # ベクトルメモリに画像情報を保存（検索用）
+        try:
+            metadata = {
+                "type": "image",
+                "image_id": image_id,
+                "title": title,
+                "description": description,
+                "tags": tags_str,
+                "file_path": destination_path,
+                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self.vector_memory.add_texts(
+                [f"{title} {description} {tags_str}"], [metadata]
+            )
+        except Exception as e:
+            print(f"ベクトルメモリへの画像情報保存に失敗しました: {str(e)}")
+
+        return image_id
+
+    def get_image_path(self, image_id: str) -> str:
+        """
+        画像IDから画像ファイルのパスを取得
+
+        Args:
+            image_id: 画像ID
+
+        Returns:
+            画像ファイルのパス（見つからない場合は空文字列）
+        """
+        # 画像ディレクトリ内のファイルを検索
+        for file_name in os.listdir(self.images_dir):
+            if file_name.startswith(image_id):
+                return os.path.join(self.images_dir, file_name)
+
+        return ""
+
+    def get_image_metadata(self, image_id: str = None) -> str:
+        """
+        特定の画像または全ての画像のメタデータを取得
+
+        Args:
+            image_id: 画像ID（Noneの場合は全ての画像のメタデータを返す）
+
+        Returns:
+            画像メタデータのMarkdown形式のテキスト
+        """
+        metadata_content = self.file_tool._run("read", self.images_metadata_file)
+
+        if not image_id:
+            return metadata_content
+
+        # 特定の画像のメタデータを抽出
+        sections = metadata_content.split("---")
+        for section in sections:
+            if section.strip() and f"## {image_id}" in section:
+                return section.strip()
+
+        return "指定された画像が見つかりません。"
+
+    def search_images(self, query: str, k: int = 5) -> str:
+        """
+        キーワードで画像を検索
+
+        Args:
+            query: 検索クエリ
+            k: 取得する結果の最大数
+
+        Returns:
+            検索結果のMarkdown形式のテキスト
+        """
+        try:
+            # ベクトルメモリで画像を検索
+            filter_dict = {"type": "image"}
+            search_results = self.vector_memory.search(query, k, filter_dict)
+
+            if not search_results:
+                return "検索条件に一致する画像は見つかりませんでした。"
+
+            result = "# 画像検索結果\n\n"
+
+            for i, item in enumerate(search_results):
+                metadata = item["metadata"]
+                image_id = metadata.get("image_id", "不明")
+                title = metadata.get("title", "無題")
+                description = metadata.get("description", "")
+                tags = metadata.get("tags", "")
+
+                result += f"## {i+1}. {title} ({image_id})\n\n"
+                if description:
+                    result += f"- **説明**: {description}\n"
+                if tags:
+                    result += f"- **タグ**: {tags}\n"
+                result += f"- **コマンド**: /image show {image_id}\n\n"
+
+            return result
+        except Exception as e:
+            print(f"画像検索に失敗しました: {str(e)}")
+            return "画像検索中にエラーが発生しました。"
+
 
 class FeedbackAnalyzer:
     """ユーザーの反応からフィードバックを分析するクラス"""
@@ -843,6 +1005,7 @@ class PersonalAI:
             "/vector": self._handle_vector,
             "/export": self._handle_export,
             "/import": self._handle_import,
+            "/image": self._handle_image,  # 画像関連コマンドを追加
         }
 
         # 記憶する情報の候補
@@ -994,6 +1157,11 @@ class PersonalAI:
 /vector clear - ベクトル記憶をクリア
 /export <ファイル名> - 設定をエクスポート
 /import <ファイル名> - 設定をインポート
+/image <サブコマンド> - 画像関連コマンド
+  - /image save <画像パス> <タイトル> [説明] [タグ] - 画像を保存
+  - /image list - 保存した画像の一覧を表示
+  - /image show <画像ID> - 指定した画像を表示
+  - /image search <キーワード> - 画像を検索
 """
 
     def _handle_remember(self, args: List[str]) -> str:
@@ -1279,6 +1447,48 @@ JSONで以下の形式で応答してください：
         except Exception as e:
             return f"インポート中にエラーが発生しました: {str(e)}"
 
+    def _handle_image(self, args: List[str]) -> str:
+        """画像関連コマンドを処理"""
+        if not args:
+            return (
+                "使用法: /image <サブコマンド>\nサブコマンド: save, list, show, search"
+            )
+
+        subcommand = args[0].lower()
+
+        if subcommand == "save":
+            if len(args) < 3:
+                return (
+                    "使用法: /image save <画像パス> <タイトル> [説明] [タグ1,タグ2,...]"
+                )
+
+            image_path = args[1]
+            title = args[2]
+            description = " ".join(args[3:]) if len(args) > 3 else ""
+            tags = args[3:] if len(args) > 3 else None
+
+            return self.memory.save_image(image_path, title, description, tags)
+        elif subcommand == "list":
+            return self.memory.get_image_metadata()
+        elif subcommand == "show":
+            if len(args) < 1:
+                return "使用法: /image show <画像ID>"
+
+            image_id = args[0]
+            image_path = self.memory.get_image_path(image_id)
+            if image_path:
+                return f"画像 '{image_id}' を表示します。"
+            else:
+                return "指定された画像が見つかりません。"
+        elif subcommand == "search":
+            if len(args) < 1:
+                return "使用法: /image search <キーワード>"
+
+            query = " ".join(args)
+            return self.memory.search_images(query)
+        else:
+            return f"不明なサブコマンド: {subcommand}"
+
     def generate_response(self, human_input: str) -> str:
         """
         ユーザーの入力に基づいてAIの応答を生成
@@ -1424,6 +1634,60 @@ JSONで以下の形式で応答してください：
 
         return response
 
+    def save_image(
+        self, image_path: str, title: str, description: str = "", tags: List[str] = None
+    ) -> str:
+        """
+        画像を保存する
+
+        Args:
+            image_path: 元の画像ファイルのパス
+            title: 画像のタイトル
+            description: 画像の説明
+            tags: 画像に関連するタグのリスト
+
+        Returns:
+            保存された画像のID
+        """
+        return self.memory.save_image(image_path, title, description, tags)
+
+    def get_image_path(self, image_id: str) -> str:
+        """
+        画像IDから画像ファイルのパスを取得
+
+        Args:
+            image_id: 画像ID
+
+        Returns:
+            画像ファイルのパス
+        """
+        return self.memory.get_image_path(image_id)
+
+    def get_image_metadata(self, image_id: str = None) -> str:
+        """
+        画像のメタデータを取得
+
+        Args:
+            image_id: 画像ID（Noneの場合は全ての画像のメタデータを返す）
+
+        Returns:
+            画像メタデータのテキスト
+        """
+        return self.memory.get_image_metadata(image_id)
+
+    def search_images(self, query: str, k: int = 5) -> str:
+        """
+        画像を検索
+
+        Args:
+            query: 検索クエリ
+            k: 取得する結果の最大数
+
+        Returns:
+            検索結果のテキスト
+        """
+        return self.memory.search_images(query, k)
+
 
 if __name__ == "__main__":
     import argparse
@@ -1447,7 +1711,7 @@ if __name__ == "__main__":
     # スプラッシュ画面表示
     console.print(
         Panel.fit(
-            f"[bold cyan]パーソナルAIアシスタント[/bold cyan] - [yellow]{args.user_id}[/yellow]",
+            "[bold cyan]パーソナルAIアシスタント[/bold cyan] - [yellow]{args.user_id}[/yellow]",
             subtitle="[dim]llama3.3[/dim]",
         )
     )

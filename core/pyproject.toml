@@ -19,6 +19,10 @@ dependencies = [
     "geocoder>=1.38.1",
     "chromadb>=0.4.18",
     "langchain-chroma>=0.1.0",
+    "slack-bolt>=1.23.0",
+    "python-dotenv>=1.0.1",
+    "olefile>=0.47",
+    "pypdf2>=3.0.1",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
@@ -35,6 +39,8 @@ dev-dependencies = [
 
 [tool.rye.scripts]
 main = { cmd = "python -m core.main" }
+human_follower = { cmd = "python -m core.run_human_follower" }
+slack = { cmd = "python -m core.slack_bot" }
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -46,3 +52,17 @@ packages = ["src/core"]
 line-length = 88
 target-version = ["py38"]
 include = '\.pyi?$'
+
+[tool.poetry.dependencies]
+python = "^3.12"
+langchain = "^0.2.7"
+langchain-community = "^0.2.7"
+langchain-chroma = "^0.1.0"
+langchain-core = "^0.2.7" 
+langchain-ollama = "^0.0.1"
+rich = "^13.7.0"
+python-dotenv = "^1.0.1"
+geocoder = "^1.38.1"
+slack-bolt = "^1.18.1"
+pillow = "^10.2.0"
+requests = "^2.31.0"

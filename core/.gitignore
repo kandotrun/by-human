@@ -8,3 +8,7 @@ wheels/
 
 # venv
 .venv
+/src/core/.env
+/memories/
+/debug_images/
+/vector_memories/
