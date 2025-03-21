@@ -1678,37 +1678,35 @@ def process_and_respond(
 
         # browser-useコマンド処理
         if text.startswith("/browser") or text.startswith("/browse"):
-            logger.info(f"browser-useコマンド検出: '{text}'")
-            parts = text.split(maxsplit=1)
-            if len(parts) < 2:
+            logger.info(f"ブラウザ使用コマンド検出: '{text}'")
+            # ユーザーIDを取得
+            user_id = ai.user_id.replace("slack_", "")
+
+            # タスク内容を取得
+            task = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
+            if not task:
                 say(
-                    "使用法: /browser <タスク内容>\n例: /browser OpenAIのウェブサイトにアクセスして最新の情報を取得",
+                    "タスクが指定されていません。`/browser <タスク内容>` の形式で指定してください。",
                     thread_ts=thread_ts,
                 )
                 return
 
-            task = parts[1]
             # チャンネルIDを取得
             channel_id = None
-
-            client = WebClient(token=SLACK_BOT_TOKEN)
-
-            try:
-                # スレッド情報からチャンネルIDを取得
-                if thread_ts:
+            if thread_ts:
+                try:
+                    client = WebClient(token=SLACK_BOT_TOKEN)
                     response = client.conversations_replies(
                         channel="C067RCQEZQX",  # デフォルトチャンネル
                         ts=thread_ts,
                     )
                     if response and response.get("ok"):
                         channel_id = response.get("channel")
-            except Exception:
-                channel_id = "C067RCQEZQX"  # デフォルトチャンネル
+                except Exception as e:
+                    logger.warning(f"チャンネルID取得中にエラー: {str(e)}")
+                    channel_id = "C067RCQEZQX"  # デフォルトチャンネル
 
-            # ユーザーIDを取得
-            user_id = ai.user_id.replace("slack_", "")
-
-            # browser-useタスクを実行
+            # ブラウザタスクを実行
             handle_browser_use(ai, task, user_id, channel_id, thread_ts, say)
             return
 
@@ -1777,21 +1775,12 @@ def process_and_respond(
         logger.info("AI応答を生成します")
         start_time = datetime.now()
 
-        # 検索タスクの検出
-        search_keywords = [
-            "検索して",
-            "探して",
-            "調べて",
-            "検索",
-            "探す",
-            "調べる",
-            "search",
-            "find",
-            "look up",
-        ]
+        # LLMを使用して入力の意図を分析
+        intent_analysis = ai.analyze_input_intent(text)
+        logger.info(f"入力意図分析結果: {intent_analysis}")
 
-        # メッセージに検索キーワードが含まれているか確認
-        is_search_request = any(keyword in text.lower() for keyword in search_keywords)
+        # 検索タスクの検出
+        is_search_request = intent_analysis["intent_type"] == "search"
 
         if is_search_request:
             # 検索タスクとして処理

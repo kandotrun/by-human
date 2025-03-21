@@ -1534,125 +1534,78 @@ def process_and_respond(
         )
         return
 
-    # browser-useコマンド処理
-    if text.startswith("/browser") or text.startswith("/browse"):
-        logger.info(f"browser-useコマンド検出: '{text}'")
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            say(
-                "使用法: /browser <タスク内容>\n例: /browser OpenAIのウェブサイトにアクセスして最新の情報を取得",
-                thread_ts=thread_ts,
-            )
+    try:
+        # 画像表示リクエストの処理（優先的に処理）
+        if text.startswith("/image") or is_image_request(text):
+            logger.info(f"画像リクエスト検出: '{text}'")
+            # スレッドのチャンネルIDを取得
+            channel_id = None
+            if thread_ts:
+                try:
+                    client = WebClient(token=SLACK_BOT_TOKEN)
+                    # スレッド情報からチャンネルIDを取得する試み
+                    for channel_type in ["conversations.replies", "channels.replies"]:
+                        try:
+                            if channel_type == "conversations.replies":
+                                response = client.conversations_replies(
+                                    channel="C067RCQEZQX",  # デフォルトチャンネル
+                                    ts=thread_ts,
+                                )
+                            else:
+                                response = client.channels_replies(
+                                    channel="C067RCQEZQX",  # デフォルトチャンネル
+                                    thread_ts=thread_ts,
+                                )
+                            if response and response.get("ok"):
+                                channel_id = response.get("channel")
+                                logger.info(
+                                    f"スレッド情報からチャンネルID '{channel_id}' を取得しました"
+                                )
+                                break
+                        except Exception as e:
+                            logger.debug(
+                                f"{channel_type}でのチャンネルID取得に失敗: {str(e)}"
+                            )
+                            continue
+                except Exception as e:
+                    logger.warning(f"チャンネルID取得中にエラー: {str(e)}")
+                    channel_id = "C067RCQEZQX"  # デフォルトチャンネル
+
+            process_image_request(ai, text, say, thread_ts, channel_id)
             return
 
-        task = parts[1]
-        # チャンネルIDを取得
-        channel_id = None
-        from slack_sdk.web import WebClient
+        # コマンド処理
+        if text.startswith("/"):
+            logger.info(f"コマンド検出: '{text}'")
+            cmd_parts = text.split()
+            cmd = cmd_parts[0][1:]  # 先頭の/を除去
+            cmd_args = cmd_parts[1:] if len(cmd_parts) > 1 else []
 
-        client = WebClient(token=SLACK_BOT_TOKEN)
+            if cmd in ai.command_handlers:
+                logger.info(f"コマンド実行: {cmd}, 引数: {cmd_args}")
+                try:
+                    result = ai.command_handlers[f"/{cmd}"](cmd_args)
+                    logger.debug(f"コマンド実行結果: {result[:100]}...")
+                    say(format_command_result(result), thread_ts=thread_ts)
+                    return
+                except Exception as e:
+                    logger.error(f"コマンド実行エラー: {str(e)}", exc_info=True)
+                    say(
+                        f"コマンド実行中にエラーが発生しました: {str(e)}",
+                        thread_ts=thread_ts,
+                    )
+                    return
 
-        try:
-            # スレッド情報からチャンネルIDを取得
-            if thread_ts:
-                response = client.conversations_replies(
-                    channel="C067RCQEZQX",  # デフォルトチャンネル
-                    ts=thread_ts,
-                )
-                if response and response.get("ok"):
-                    channel_id = response.get("channel")
-        except Exception:
-            channel_id = "C067RCQEZQX"  # デフォルトチャンネル
+        # 通常の会話処理
+        logger.info("AI応答を生成します")
+        start_time = datetime.now()
 
-        # ユーザーIDを取得
-        user_id = ai.user_id.replace("slack_", "")
+        # LLMを使用して入力の意図を分析
+        intent_analysis = ai.analyze_input_intent(text)
+        logger.info(f"入力意図分析結果: {intent_analysis}")
 
-        # browser-useタスクを実行
-        handle_browser_use(ai, task, user_id, channel_id, thread_ts, say)
-        return
-
-    # 画像表示リクエストの処理（優先的に処理）
-    if text.startswith("/image") or is_image_request(text):
-        logger.info(f"画像リクエスト検出: '{text}'")
-        # スレッドのチャンネルIDを取得
-        channel_id = None
-        if thread_ts:
-            try:
-                from slack_sdk.web import WebClient
-
-                client = WebClient(token=SLACK_BOT_TOKEN)
-                # スレッド情報からチャンネルIDを取得する試み
-                for channel_type in ["conversations.replies", "channels.replies"]:
-                    try:
-                        if channel_type == "conversations.replies":
-                            response = client.conversations_replies(
-                                channel="C067RCQEZQX",  # デフォルトチャンネル
-                                ts=thread_ts,
-                            )
-                        else:
-                            response = client.channels_replies(
-                                channel="C067RCQEZQX",  # デフォルトチャンネル
-                                thread_ts=thread_ts,
-                            )
-                        if response and response.get("ok"):
-                            channel_id = response.get("channel")
-                            logger.info(
-                                f"スレッド情報からチャンネルID '{channel_id}' を取得しました"
-                            )
-                            break
-                    except Exception as e:
-                        logger.debug(
-                            f"{channel_type}でのチャンネルID取得に失敗: {str(e)}"
-                        )
-                        continue
-            except Exception as e:
-                logger.warning(f"チャンネルID取得中にエラー: {str(e)}")
-                channel_id = "C067RCQEZQX"  # デフォルトチャンネル
-
-        process_image_request(ai, text, say, thread_ts, channel_id)
-        return
-
-    # コマンド処理
-    if text.startswith("/"):
-        logger.info(f"コマンド検出: '{text}'")
-        cmd_parts = text.split()
-        cmd = cmd_parts[0][1:]  # 先頭の/を除去
-        cmd_args = cmd_parts[1:] if len(cmd_parts) > 1 else []
-
-        if cmd in ai.command_handlers:
-            logger.info(f"コマンド実行: {cmd}, 引数: {cmd_args}")
-            try:
-                result = ai.command_handlers[f"/{cmd}"](cmd_args)
-                logger.debug(f"コマンド実行結果: {result[:100]}...")
-                say(format_command_result(result), thread_ts=thread_ts)
-                return
-            except Exception as e:
-                logger.error(f"コマンド実行エラー: {str(e)}", exc_info=True)
-                say(
-                    f"コマンド実行中にエラーが発生しました: {str(e)}",
-                    thread_ts=thread_ts,
-                )
-                return
-
-    # 通常の会話処理
-    logger.info("AI応答を生成します")
-    start_time = datetime.now()
-    try:
         # 検索タスクの検出
-        search_keywords = [
-            "検索して",
-            "探して",
-            "調べて",
-            "検索",
-            "探す",
-            "調べる",
-            "search",
-            "find",
-            "look up",
-        ]
-
-        # メッセージに検索キーワードが含まれているか確認
-        is_search_request = any(keyword in text.lower() for keyword in search_keywords)
+        is_search_request = intent_analysis["intent_type"] == "search"
 
         if is_search_request and BROWSER_USE_AVAILABLE:
             # 検索タスクとして処理

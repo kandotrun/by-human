@@ -1328,6 +1328,67 @@ class PersonalAI:
 
         return f"不明なコマンド: {cmd}\n/help で利用可能なコマンドを確認できます。"
 
+    def analyze_input_intent(self, text: str) -> Dict[str, Any]:
+        """
+        ユーザー入力の意図をLLMを使用して分析する
+
+        Args:
+            text: ユーザー入力テキスト
+
+        Returns:
+            分析結果の辞書（意図タイプ、信頼度など）
+        """
+        # 処理が重くなるため、明らかなコマンドはLLM分析せずに早期リターン
+        if text.startswith("/"):
+            return {"intent_type": "command", "confidence": 1.0, "command": text}
+
+        # プロンプト作成
+        prompt = PromptTemplate(
+            input_variables=["text"],
+            template="""
+あなたはユーザー入力を分析し、その意図を判断するAIアシスタントです。
+入力に基づいて、それがコマンド、検索リクエスト、または通常の会話のどれであるかを判断してください。
+
+## ユーザー入力
+{text}
+
+以下のJSON形式で意図を分類してください:
+{{
+  "intent_type": "command" または "search" または "conversation",
+  "confidence": 0.0から1.0の数値（確信度）,
+  "explanation": "判断理由を1文で"
+}}
+
+- "command": ユーザーが特定の機能や操作を実行するよう明示的に指示している
+- "search": ユーザーが情報を探したり調べたりすることを求めている
+- "conversation": 一般的な会話や雑談、質問
+
+注意: 「~を見せて」「~について教えて」などの表現があっても、それが単なる会話の一部である可能性もあります。
+コンテキストから判断してください。
+""",
+        )
+
+        # LLMチェーンで分析
+        chain = LLMChain(
+            llm=OllamaLLM(model=self.ollama_model, temperature=0.1), prompt=prompt
+        )
+        result = chain.run(text=text)
+
+        try:
+            # 結果をJSON形式で解析
+            json_str = re.search(r"\{.*\}", result, re.DOTALL)
+            if json_str:
+                return json.loads(json_str.group(0))
+            else:
+                return json.loads(result)
+        except:
+            # JSON解析に失敗した場合はデフォルト値を返す
+            return {
+                "intent_type": "conversation",
+                "confidence": 0.7,
+                "explanation": "JSONの解析に失敗したためデフォルトで会話として処理",
+            }
+
     def _handle_help(self, args: List[str]) -> str:
         """ヘルプコマンドを処理"""
         return """利用可能なコマンド:
@@ -1702,11 +1763,16 @@ JSONで以下の形式で応答してください：
                 self.memory_candidate = None
                 return "わかりました。記憶しません。"
 
-        # コマンド処理
-        command_result = self.process_command(human_input)
-        if command_result is not None:
-            return command_result
+        # 入力の意図を分析
+        intent_analysis = self.analyze_input_intent(human_input)
 
+        # コマンド処理
+        if intent_analysis["intent_type"] == "command" or human_input.startswith("/"):
+            command_result = self.process_command(human_input)
+            if command_result is not None:
+                return command_result
+
+        # ここから先は通常の会話として処理
         # 会話履歴を更新
         self.conversation_history.append({"role": "user", "content": human_input})
 
