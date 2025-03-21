@@ -31,6 +31,17 @@ import hashlib
 import threading
 import atexit
 
+# MCP関連のインポート
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    from langchain_mcp_adapters.tools import load_mcp_tools
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+    logger.warning("MCP関連のライブラリがインストールされていないため、ターミナル制御機能が制限されます")
+
 # browser-use関連のインポート（インストールされている場合のみ）
 BROWSER_USE_AVAILABLE = False
 try:
@@ -83,6 +94,107 @@ app = App(token=SLACK_BOT_TOKEN)
 # WebClientを多くの場所で使うので、インポートを上部に移動
 from slack_sdk.web import WebClient
 
+# MCP関連のグローバル変数
+_mcp_client = None
+_mcp_tools = None
+
+class MCPTerminalController:
+    """
+    MCPを使用してターミナルを制御するためのクラス
+    """
+    def __init__(self):
+        self.client = None
+        self.tools = None
+        self.initialized = False
+        self.server_process = None
+    
+    async def initialize(self):
+        """MCPクライアントとツールを初期化する"""
+        if not MCP_AVAILABLE:
+            logger.warning("MCP関連のライブラリがインストールされていないため、ターミナル制御を初期化できません")
+            return False
+            
+        try:
+            logger.info("MCPターミナルコントローラを初期化中...")
+            
+            # ターミナルMCPサーバーのパラメータ
+            terminal_params = StdioServerParameters(
+                command="npx",
+                args=["y", "@joshuarileydev/terminal-mcp-server"]
+            )
+            
+            # マルチサーバークライアントの作成
+            self.client = MultiServerMCPClient()
+            
+            # ターミナルサーバーを追加
+            await self.client.add_server('terminal', stdio_client, terminal_params)
+            
+            # 利用可能なツールをロード
+            self.tools = await load_mcp_tools(self.client)
+            
+            logger.info(f"MCPツールが正常にロードされました: {len(self.tools)}")
+            for tool in self.tools:
+                logger.debug(f"利用可能なMCPツール: {tool.name}")
+            
+            self.initialized = True
+            return True
+        except Exception as e:
+            logger.error(f"MCP初期化エラー: {str(e)}", exc_info=True)
+            return False
+    
+    async def execute_command(self, command, working_directory=None):
+        """
+        ターミナルコマンドを実行する
+        
+        Args:
+            command: 実行するコマンド
+            working_directory: 作業ディレクトリ（省略可）
+            
+        Returns:
+            コマンド実行結果
+        """
+        if not self.initialized:
+            success = await self.initialize()
+            if not success:
+                return "MCPの初期化に失敗しました。"
+        
+        try:
+            # ターミナルツールを探す
+            terminal_tool = None
+            for tool in self.tools:
+                if tool.name == "terminal":
+                    terminal_tool = tool
+                    break
+            
+            if not terminal_tool:
+                return "ターミナルツールが見つかりません。"
+            
+            # 作業ディレクトリの設定（指定がある場合）
+            if working_directory:
+                cd_result = await terminal_tool.invoke({"command": f"cd {working_directory}"})
+                logger.debug(f"作業ディレクトリ変更結果: {cd_result}")
+            
+            # コマンド実行
+            result = await terminal_tool.invoke({"command": command})
+            logger.info(f"コマンド '{command}' の実行結果: {result[:100]}...")
+            
+            return result
+        except Exception as e:
+            error_msg = f"コマンド実行エラー: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return error_msg
+    
+    async def close(self):
+        """MCPクライアントを閉じる"""
+        if self.client:
+            try:
+                await self.client.close()
+                logger.info("MCPクライアントを閉じました")
+            except Exception as e:
+                logger.error(f"MCPクライアントを閉じる際にエラー: {str(e)}")
+
+# MCPコントローラのグローバルインスタンス
+mcp_terminal_controller = MCPTerminalController()
 
 def set_bot_status(
     status_text="起動中！", status_emoji=":robot_face:", presence="auto"
@@ -710,6 +822,99 @@ def handle_link_command(ack, body, logger, say):
     logger.info(f"ユーザー {user_id} にリンクコード {link_code} を生成しました")
 
 
+@app.command("/terminal")
+def handle_terminal_command(ack, body, logger, say):
+    """
+    /terminal スラッシュコマンドを処理する - MCPを使用してターミナルコマンドを実行
+
+    Args:
+        ack: 受信確認
+        body: リクエストボディ
+        logger: ロガー
+        say: メッセージ送信関数
+    """
+    # コマンドを確認応答
+    ack()
+
+    logger.info(f"スラッシュコマンド /terminal を受信: {body}")
+
+    # ユーザーIDを取得
+    user_id = body["user_id"]
+
+    # チャンネルIDを取得
+    channel_id = body["channel_id"]
+
+    # スレッドタイムスタンプを取得（もし存在すれば）
+    thread_ts = body.get("thread_ts")
+
+    # コマンドテキストを取得
+    command_text = body.get("text", "").strip()
+
+    if not command_text:
+        say(
+            text="使用法: /terminal <実行するコマンド>",
+            thread_ts=thread_ts,
+            channel=channel_id,
+        )
+        return
+
+    # 処理中メッセージを送信
+    say(
+        text=f"コマンド `{command_text}` を実行中...",
+        thread_ts=thread_ts,
+        channel=channel_id,
+    )
+
+    # MCPが利用可能か確認
+    if not MCP_AVAILABLE:
+        say(
+            text="MCPが利用できません。以下のパッケージをインストールしてください:\n```\npip install mcp langchain-mcp-adapters\nnpm install -g @joshuarileydev/terminal-mcp-server\n```",
+            thread_ts=thread_ts,
+            channel=channel_id,
+        )
+        return
+
+    # 非同期関数でMCPコマンドを実行
+    async def run_mcp_command():
+        try:
+            # コマンド実行
+            result = await mcp_terminal_controller.execute_command(command_text)
+            
+            # 結果が長すぎる場合は切り詰める
+            if len(result) > 3000:
+                result = result[:3000] + "\n... (結果が長すぎるため切り詰められました)"
+            
+            # 結果を送信
+            say(
+                text=f"コマンド `{command_text}` の実行結果:\n```\n{result}\n```",
+                thread_ts=thread_ts,
+                channel=channel_id,
+            )
+            
+            # ユーザーのAIインスタンスを取得
+            ai = get_ai_for_user(user_id)
+            
+            # 対話履歴に保存
+            ai.save_conversation(
+                f"[ターミナルコマンド] {command_text}", result, None  # 新しい会話IDを生成
+            )
+            
+        except Exception as e:
+            error_msg = f"コマンド実行中にエラーが発生しました: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            say(
+                text=error_msg,
+                thread_ts=thread_ts,
+                channel=channel_id,
+            )
+
+    # 非同期関数を実行
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_mcp_command())
+    loop.close()
+
+
 # ユーザーリンク管理クラス
 class UserLinkManager:
     """
@@ -1048,8 +1253,22 @@ def handle_help_command(ai: PersonalAI) -> str:
         "• `/memo update <ID> <内容>` - 既存のメモ帳を更新（内容省略時はAIが自動で補足）",
         "• `/memo history <ID>` - メモ帳の編集履歴を表示",
         "",
-        "*高度な機能*",
+        "*ターミナル機能*",
     ]
+
+    if MCP_AVAILABLE:
+        commands.append("• `/terminal <コマンド>` - ターミナルコマンドを実行")
+        commands.append("• `$ <コマンド>` - 頭に $ をつけてコマンドを実行")
+        commands.append("• `実行: <コマンド>` - 「実行:」の後にコマンドを記述して実行")
+        commands.append("• `ターミナル: <コマンド>` - 「ターミナル:」の後にコマンドを記述して実行")
+        commands.append("• `コマンド: <コマンド>` - 「コマンド:」の後にコマンドを記述して実行")
+    else:
+        commands.append("• ターミナル機能を使用するには追加パッケージのインストールが必要です:")
+        commands.append("  `pip install mcp langchain-mcp-adapters`")
+        commands.append("  `npm install -g @joshuarileydev/terminal-mcp-server`")
+
+    commands.append("")
+    commands.append("*高度な機能*")
 
     if BROWSER_USE_AVAILABLE:
         commands.append("• `/browser <タスク>` - ウェブブラウザを使ったタスクを実行")
@@ -1256,7 +1475,7 @@ def analyze_csv_file(file_path: str, prompt: str = None) -> str:
         csv_info = f"""
 CSVファイル概要:
 - 行数: {row_count}
-- 列数: {col_count}
+- 列数: {col_count} 
 - カラム: {column_names}
 
 サンプルデータ（最初の5行）:
@@ -1640,6 +1859,50 @@ def process_and_respond(
             new_text = "/" + text[1:]
             logger.debug(f"コマンド変換: '{text}' → '{new_text}'")
             text = new_text
+
+        # ターミナルコマンド実行パターンの検出
+        terminal_patterns = [r"^\$\s+(.+)$", r"^実行\s*[:：]\s*(.+)$", r"^ターミナル\s*[:：]\s*(.+)$", r"^コマンド\s*[:：]\s*(.+)$"]
+        terminal_command = None
+        
+        for pattern in terminal_patterns:
+            match = re.match(pattern, text)
+            if match:
+                terminal_command = match.group(1)
+                logger.info(f"ターミナルコマンドを検出: '{terminal_command}'")
+                break
+        
+        # ターミナルコマンドが検出された場合は実行
+        if terminal_command and MCP_AVAILABLE:
+            # 処理中メッセージを送信
+            say(f"コマンド `{terminal_command}` を実行中...", thread_ts=thread_ts)
+            
+            # 非同期関数でコマンドを実行
+            async def run_detected_command():
+                try:
+                    # コマンド実行
+                    result = await mcp_terminal_controller.execute_command(terminal_command)
+                    
+                    # 結果が長すぎる場合は切り詰める
+                    if len(result) > 3000:
+                        result = result[:3000] + "\n... (結果が長すぎるため切り詰められました)"
+                    
+                    # 結果を送信
+                    say(f"コマンド `{terminal_command}` の実行結果:\n```\n{result}\n```", thread_ts=thread_ts)
+                    
+                    # 会話に保存
+                    ai.save_conversation(f"[ターミナルコマンド] {terminal_command}", result, None)
+                    
+                except Exception as e:
+                    error_msg = f"コマンド実行中にエラーが発生しました: {str(e)}"
+                    logger.error(error_msg, exc_info=True)
+                    say(error_msg, thread_ts=thread_ts)
+            
+            # 非同期関数を実行
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(run_detected_command())
+            loop.close()
+            return
 
         # 記憶確認応答処理
         if ai.memory_candidate is not None:
@@ -3199,6 +3462,25 @@ def start_slack_bot():
     else:
         logger.info(f"デバッグモードは無効です。画像ファイルは処理後に削除されます。")
 
+    # MCPコントローラの初期化（非同期なので別スレッドで実行）
+    if MCP_AVAILABLE:
+        logger.info("MCPコントローラを初期化しています...")
+        
+        def init_mcp_controller():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(mcp_terminal_controller.initialize())
+                logger.info("MCPコントローラの初期化が完了しました")
+            except Exception as e:
+                logger.error(f"MCPコントローラの初期化に失敗: {str(e)}", exc_info=True)
+            finally:
+                loop.close()
+        
+        # 別スレッドでMCPコントローラを初期化
+        mcp_init_thread = threading.Thread(target=init_mcp_controller, daemon=True)
+        mcp_init_thread.start()
+    
     try:
         logger.info("Slackボットを起動中...")
 
@@ -3229,6 +3511,25 @@ def start_slack_bot_in_background():
 
     logger.info("Slackボットをバックグラウンドで起動します...")
 
+    # MCPコントローラの初期化（非同期なので別スレッドで実行）
+    if MCP_AVAILABLE:
+        logger.info("MCPコントローラを初期化しています...")
+        
+        def init_mcp_controller():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(mcp_terminal_controller.initialize())
+                logger.info("MCPコントローラの初期化が完了しました")
+            except Exception as e:
+                logger.error(f"MCPコントローラの初期化に失敗: {str(e)}", exc_info=True)
+            finally:
+                loop.close()
+        
+        # 別スレッドでMCPコントローラを初期化
+        mcp_init_thread = threading.Thread(target=init_mcp_controller, daemon=True)
+        mcp_init_thread.start()
+    
     def run_bot():
         try:
             # ボットを起動したらステータスを「起動中！」に設定
