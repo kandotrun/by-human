@@ -37,10 +37,13 @@ try:
     from mcp.client.stdio import stdio_client
     from langchain_mcp_adapters.tools import load_mcp_tools
     from langchain_mcp_adapters.client import MultiServerMCPClient
+
     MCP_AVAILABLE = True
 except ImportError:
     MCP_AVAILABLE = False
-    logger.warning("MCP関連のライブラリがインストールされていないため、ターミナル制御機能が制限されます")
+    logger.warning(
+        "MCP関連のライブラリがインストールされていないため、ターミナル制御機能が制限されます"
+    )
 
 # browser-use関連のインポート（インストールされている場合のみ）
 BROWSER_USE_AVAILABLE = False
@@ -98,58 +101,147 @@ from slack_sdk.web import WebClient
 _mcp_client = None
 _mcp_tools = None
 
+
 class MCPTerminalController:
     """
     MCPを使用してターミナルを制御するためのクラス
     """
+
     def __init__(self):
         self.client = None
         self.tools = None
         self.initialized = False
         self.server_process = None
-    
+
     async def initialize(self):
         """MCPクライアントとツールを初期化する"""
         if not MCP_AVAILABLE:
-            logger.warning("MCP関連のライブラリがインストールされていないため、ターミナル制御を初期化できません")
+            logger.warning(
+                "MCP関連のライブラリがインストールされていないため、ターミナル制御を初期化できません"
+            )
             return False
-            
+
         try:
             logger.info("MCPターミナルコントローラを初期化中...")
-            
-            # ターミナルMCPサーバーのパラメータ
-            terminal_params = StdioServerParameters(
-                command="npx",
-                args=["y", "@joshuarileydev/terminal-mcp-server"]
+
+            # 複数のターミナルMCPサーバー実装を試す
+            server_configs = [
+                {
+                    "terminal": {
+                        "command": "npx",
+                        "args": ["--yes", "@joshuarileydev/terminal-mcp-server"],
+                        "transport": "stdio",
+                    }
+                },
+                # 方法3: Python実装のオプション
+                {
+                    "terminal": {
+                        "command": "python",
+                        "args": ["-m", "mcp.server.stdio_server"],
+                        "transport": "stdio",
+                    }
+                },
+            ]
+
+            # 各設定を順番に試す
+            for i, config in enumerate(server_configs):
+                try:
+                    logger.info(f"MCPサーバー設定 {i+1} を試行: {config}")
+
+                    # マルチサーバークライアントの作成
+                    self.client = MultiServerMCPClient(config)
+                    await self.client.__aenter__()  # 非同期コンテキストマネージャを手動で開始
+
+                    # 利用可能なツールをロード
+                    self.tools = self.client.get_tools()
+
+                    if self.tools and len(self.tools) > 0:
+                        logger.info(
+                            f"MCPツールが正常にロードされました: {len(self.tools)}"
+                        )
+                        # 利用可能なツールの詳細情報をログに出力
+                        for i, tool in enumerate(self.tools):
+                            logger.info(
+                                f"MCPツール {i+1}: 名前={tool.name}, 説明={tool.description if hasattr(tool, 'description') else 'なし'}"
+                            )
+
+                        self.initialized = True
+                        return True
+                    else:
+                        logger.warning(
+                            "この設定ではツールが見つかりませんでした。別の設定を試します。"
+                        )
+                        # 現在のクライアントを閉じる
+                        try:
+                            await self.client.__aexit__(None, None, None)
+                        except:
+                            pass
+                except Exception as config_error:
+                    logger.warning(f"設定 {i+1} の試行中にエラー: {str(config_error)}")
+                    # 次の設定を試す前にクライアントをクリーンアップ
+                    if hasattr(self, "client") and self.client:
+                        try:
+                            await self.client.__aexit__(None, None, None)
+                        except:
+                            pass
+
+            # すべての設定が失敗した場合、自作のシンプルなターミナルツールを作成
+            logger.info("MCP設定が失敗したため、シンプルなターミナルツールを作成します")
+            from langchain.tools import Tool
+            import subprocess
+
+            # シンプルなシェルコマンド実行関数
+            async def run_shell_command(command_str):
+                try:
+                    process = subprocess.Popen(
+                        command_str,
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    stdout, stderr = process.communicate(timeout=30)
+                    return_code = process.returncode
+
+                    result = f"コマンド: {command_str}\n"
+                    if stdout:
+                        result += f"標準出力:\n{stdout}\n"
+                    if stderr:
+                        result += f"エラー出力:\n{stderr}\n"
+                    result += f"終了コード: {return_code}"
+
+                    return result
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    return "コマンドがタイムアウトしました (30秒)"
+                except Exception as e:
+                    return f"コマンド実行中にエラーが発生しました: {str(e)}"
+
+            # ツール作成
+            terminal_tool = Tool(
+                name="terminal",
+                func=run_shell_command,
+                description="任意のシェルコマンドを実行します",
+                coroutine=run_shell_command,
             )
-            
-            # マルチサーバークライアントの作成
-            self.client = MultiServerMCPClient()
-            
-            # ターミナルサーバーを追加
-            await self.client.add_server('terminal', stdio_client, terminal_params)
-            
-            # 利用可能なツールをロード
-            self.tools = await load_mcp_tools(self.client)
-            
-            logger.info(f"MCPツールが正常にロードされました: {len(self.tools)}")
-            for tool in self.tools:
-                logger.debug(f"利用可能なMCPツール: {tool.name}")
-            
+
+            self.tools = [terminal_tool]
+            logger.info("シンプルなターミナルツールを作成しました")
             self.initialized = True
             return True
+
         except Exception as e:
             logger.error(f"MCP初期化エラー: {str(e)}", exc_info=True)
             return False
-    
+
     async def execute_command(self, command, working_directory=None):
         """
         ターミナルコマンドを実行する
-        
+
         Args:
             command: 実行するコマンド
             working_directory: 作業ディレクトリ（省略可）
-            
+
         Returns:
             コマンド実行結果
         """
@@ -157,44 +249,244 @@ class MCPTerminalController:
             success = await self.initialize()
             if not success:
                 return "MCPの初期化に失敗しました。"
-        
+
         try:
-            # ターミナルツールを探す
+            # 利用可能なツールの名前をログに出力
+            tool_names = [tool.name for tool in self.tools]
+            logger.info(f"利用可能なツール名: {tool_names}")
+
+            # ツールの詳細情報をデバッグ出力
+            for i, tool in enumerate(self.tools):
+                logger.info(f"ツール {i+1} の詳細:")
+                logger.info(f"  名前: {tool.name}")
+
+                # 関数シグネチャの確認
+                try:
+                    if hasattr(tool, "_run") and callable(tool._run):
+                        import inspect
+
+                        sig = inspect.signature(tool._run)
+                        logger.info(f"  _run関数のシグネチャ: {sig}")
+
+                    # 引数の確認
+                    if hasattr(tool, "args_schema"):
+                        logger.info(f"  引数スキーマ: {tool.args_schema}")
+
+                    # invoke関数のシグネチャ
+                    if hasattr(tool, "invoke") and callable(tool.invoke):
+                        sig = inspect.signature(tool.invoke)
+                        logger.info(f"  invoke関数のシグネチャ: {sig}")
+                except Exception as e:
+                    logger.info(f"  シグネチャ取得エラー: {str(e)}")
+
+            # ターミナルツールを探す - ツールが1つしかない場合は最初のツールを使用
             terminal_tool = None
-            for tool in self.tools:
-                if tool.name == "terminal":
-                    terminal_tool = tool
-                    break
-            
+            if len(self.tools) == 1:
+                terminal_tool = self.tools[0]
+                logger.info(
+                    f"利用可能なツールが1つだけなので、それを使用します: {terminal_tool.name}"
+                )
+            else:
+                # 複数のツールがある場合、どのツールがコマンド実行をサポートしているか確認
+                for tool in self.tools:
+                    # 名前で判断
+                    if (
+                        tool.name == "terminal"
+                        or "terminal" in tool.name.lower()
+                        or "exec" in tool.name.lower()
+                        or "command" in tool.name.lower()
+                        or "shell" in tool.name.lower()
+                        or "run" in tool.name.lower()
+                    ):
+                        terminal_tool = tool
+                        logger.info(
+                            f"名前マッチによりターミナルツールを見つけました: {tool.name}"
+                        )
+                        break
+
+                    # 引数スキーマで判断（command引数を持つツールを探す）
+                    try:
+                        if hasattr(tool, "args_schema"):
+                            schema_str = str(tool.args_schema).lower()
+                            if "command" in schema_str:
+                                terminal_tool = tool
+                                logger.info(
+                                    f"引数スキーマで command を持つツールを見つけました: {tool.name}"
+                                )
+                                break
+                    except Exception as schema_err:
+                        logger.info(f"スキーマ確認エラー: {str(schema_err)}")
+
+            # それでも見つからない場合は最初のツールを試す
+            if not terminal_tool and self.tools:
+                terminal_tool = self.tools[0]
+                logger.info(
+                    f"ターミナルツールが見つからないため、最初のツールを使用します: {terminal_tool.name}"
+                )
+
             if not terminal_tool:
-                return "ターミナルツールが見つかりません。"
-            
-            # 作業ディレクトリの設定（指定がある場合）
-            if working_directory:
-                cd_result = await terminal_tool.invoke({"command": f"cd {working_directory}"})
-                logger.debug(f"作業ディレクトリ変更結果: {cd_result}")
-            
-            # コマンド実行
-            result = await terminal_tool.invoke({"command": command})
-            logger.info(f"コマンド '{command}' の実行結果: {result[:100]}...")
-            
+                return (
+                    "ターミナルツールが見つかりません。利用可能なツール: "
+                    + ", ".join(tool_names)
+                )
+
+            # 作業ディレクトリがない場合はカレントディレクトリを使用
+            if not working_directory:
+                working_directory = "."
+                logger.info(
+                    f"作業ディレクトリが指定されていないため、カレントディレクトリを使用します: {working_directory}"
+                )
+
+            # コマンド実行前にログ出力
+            logger.info(
+                f"ツール {terminal_tool.name} でコマンド '{command}' を実行します（ディレクトリ: {working_directory}）"
+            )
+
+            # run_commandツールの場合は、必須パラメータdirectoryを含める
+            if terminal_tool.name == "run_command":
+                try:
+                    # 正しい形式で引数を渡す
+                    result = await terminal_tool.ainvoke(
+                        {"command": command, "directory": working_directory}
+                    )
+                    logger.info(f"run_commandツールでコマンド実行に成功しました")
+                except AttributeError:
+                    # ainvokeがない場合はinvokeを試す
+                    result = await terminal_tool.invoke(
+                        {"command": command, "directory": working_directory}
+                    )
+                    logger.info(f"invokeメソッドでコマンド実行に成功しました")
+                except Exception as e:
+                    logger.error(
+                        f"run_commandツール実行エラー: {str(e)}", exc_info=True
+                    )
+
+                    # フォールバック: サブプロセスを直接使用
+                    logger.info("サブプロセスを直接使用してコマンドを実行します")
+                    import subprocess
+
+                    try:
+                        process = subprocess.Popen(
+                            command,
+                            shell=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            cwd=working_directory,
+                        )
+                        stdout, stderr = process.communicate(timeout=30)
+                        return_code = process.returncode
+
+                        result = f"標準出力:\n{stdout}\n"
+                        if stderr:
+                            result += f"エラー出力:\n{stderr}\n"
+
+                        logger.info(f"サブプロセスでコマンド実行に成功しました")
+                        return result
+                    except Exception as subprocess_error:
+                        return f"コマンド実行エラー: {str(subprocess_error)}"
+            else:
+                # その他のツールの場合は複数の形式を試す
+                try:
+                    # 通常の形式を試す
+                    result = await terminal_tool.invoke({"command": command})
+                    logger.info(f"コマンド '{command}' の実行に成功しました")
+                except Exception as e1:
+                    logger.warning(f"標準形式でのコマンド実行に失敗: {str(e1)}")
+                    try:
+                        # 別の形式を試す
+                        result = await terminal_tool.invoke(command)
+                        logger.info(
+                            f"文字列形式でコマンド '{command}' の実行に成功しました"
+                        )
+                    except Exception as e2:
+                        logger.warning(f"文字列形式でのコマンド実行に失敗: {str(e2)}")
+                        try:
+                            # "cmd"をキーとして試す
+                            result = await terminal_tool.invoke({"cmd": command})
+                            logger.info(
+                                f"cmd形式でコマンド '{command}' の実行に成功しました"
+                            )
+                        except Exception as e3:
+                            logger.error(f"すべての形式でコマンド実行に失敗: {str(e3)}")
+
+                            # フォールバック: サブプロセスを直接使用
+                            logger.info(
+                                "サブプロセスを直接使用してコマンドを実行します"
+                            )
+                            import subprocess
+
+                            try:
+                                process = subprocess.Popen(
+                                    command,
+                                    shell=True,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    text=True,
+                                )
+                                stdout, stderr = process.communicate(timeout=30)
+                                return_code = process.returncode
+
+                                result = f"標準出力:\n{stdout}\n"
+                                if stderr:
+                                    result += f"エラー出力:\n{stderr}\n"
+
+                                logger.info(f"サブプロセスでコマンド実行に成功しました")
+                                return result
+                            except Exception as subprocess_error:
+                                return f"コマンド実行エラー: {str(subprocess_error)}"
+
+            # 結果をログに出力
+            if isinstance(result, str):
+                truncated_result = result[:100] + "..." if len(result) > 100 else result
+            else:
+                truncated_result = str(result)[:100] + "..."
+            logger.info(f"コマンド '{command}' の実行結果: {truncated_result}")
+
             return result
         except Exception as e:
             error_msg = f"コマンド実行エラー: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            return error_msg
-    
+
+            # 最終手段: 直接サブプロセスを使用
+            logger.info("最終手段としてサブプロセスを直接使用してコマンドを実行します")
+            import subprocess
+
+            try:
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                stdout, stderr = process.communicate(timeout=30)
+                return_code = process.returncode
+
+                result = f"標準出力:\n{stdout}\n"
+                if stderr:
+                    result += f"エラー出力:\n{stderr}\n"
+
+                logger.info(f"サブプロセスでコマンド実行に成功しました")
+                return result
+            except Exception as subprocess_error:
+                return f"すべての方法でコマンド実行に失敗しました: {str(e)}\nサブプロセスエラー: {str(subprocess_error)}"
+
     async def close(self):
         """MCPクライアントを閉じる"""
         if self.client:
             try:
-                await self.client.close()
+                await self.client.__aexit__(
+                    None, None, None
+                )  # 非同期コンテキストマネージャを手動で終了
                 logger.info("MCPクライアントを閉じました")
             except Exception as e:
                 logger.error(f"MCPクライアントを閉じる際にエラー: {str(e)}")
 
+
 # MCPコントローラのグローバルインスタンス
 mcp_terminal_controller = MCPTerminalController()
+
 
 def set_bot_status(
     status_text="起動中！", status_emoji=":robot_face:", presence="auto"
@@ -879,26 +1171,28 @@ def handle_terminal_command(ack, body, logger, say):
         try:
             # コマンド実行
             result = await mcp_terminal_controller.execute_command(command_text)
-            
+
             # 結果が長すぎる場合は切り詰める
             if len(result) > 3000:
                 result = result[:3000] + "\n... (結果が長すぎるため切り詰められました)"
-            
+
             # 結果を送信
             say(
                 text=f"コマンド `{command_text}` の実行結果:\n```\n{result}\n```",
                 thread_ts=thread_ts,
                 channel=channel_id,
             )
-            
+
             # ユーザーのAIインスタンスを取得
             ai = get_ai_for_user(user_id)
-            
+
             # 対話履歴に保存
             ai.save_conversation(
-                f"[ターミナルコマンド] {command_text}", result, None  # 新しい会話IDを生成
+                f"[ターミナルコマンド] {command_text}",
+                result,
+                None,  # 新しい会話IDを生成
             )
-            
+
         except Exception as e:
             error_msg = f"コマンド実行中にエラーが発生しました: {str(e)}"
             logger.error(error_msg, exc_info=True)
@@ -1260,10 +1554,16 @@ def handle_help_command(ai: PersonalAI) -> str:
         commands.append("• `/terminal <コマンド>` - ターミナルコマンドを実行")
         commands.append("• `$ <コマンド>` - 頭に $ をつけてコマンドを実行")
         commands.append("• `実行: <コマンド>` - 「実行:」の後にコマンドを記述して実行")
-        commands.append("• `ターミナル: <コマンド>` - 「ターミナル:」の後にコマンドを記述して実行")
-        commands.append("• `コマンド: <コマンド>` - 「コマンド:」の後にコマンドを記述して実行")
+        commands.append(
+            "• `ターミナル: <コマンド>` - 「ターミナル:」の後にコマンドを記述して実行"
+        )
+        commands.append(
+            "• `コマンド: <コマンド>` - 「コマンド:」の後にコマンドを記述して実行"
+        )
     else:
-        commands.append("• ターミナル機能を使用するには追加パッケージのインストールが必要です:")
+        commands.append(
+            "• ターミナル機能を使用するには追加パッケージのインストールが必要です:"
+        )
         commands.append("  `pip install mcp langchain-mcp-adapters`")
         commands.append("  `npm install -g @joshuarileydev/terminal-mcp-server`")
 
@@ -1861,42 +2161,57 @@ def process_and_respond(
             text = new_text
 
         # ターミナルコマンド実行パターンの検出
-        terminal_patterns = [r"^\$\s+(.+)$", r"^実行\s*[:：]\s*(.+)$", r"^ターミナル\s*[:：]\s*(.+)$", r"^コマンド\s*[:：]\s*(.+)$"]
+        terminal_patterns = [
+            r"^\$\s+(.+)$",
+            r"^実行\s*[:：]\s*(.+)$",
+            r"^ターミナル\s*[:：]\s*(.+)$",
+            r"^コマンド\s*[:：]\s*(.+)$",
+        ]
         terminal_command = None
-        
+
         for pattern in terminal_patterns:
             match = re.match(pattern, text)
             if match:
                 terminal_command = match.group(1)
                 logger.info(f"ターミナルコマンドを検出: '{terminal_command}'")
                 break
-        
+
         # ターミナルコマンドが検出された場合は実行
         if terminal_command and MCP_AVAILABLE:
             # 処理中メッセージを送信
             say(f"コマンド `{terminal_command}` を実行中...", thread_ts=thread_ts)
-            
+
             # 非同期関数でコマンドを実行
             async def run_detected_command():
                 try:
                     # コマンド実行
-                    result = await mcp_terminal_controller.execute_command(terminal_command)
-                    
+                    result = await mcp_terminal_controller.execute_command(
+                        terminal_command
+                    )
+
                     # 結果が長すぎる場合は切り詰める
                     if len(result) > 3000:
-                        result = result[:3000] + "\n... (結果が長すぎるため切り詰められました)"
-                    
+                        result = (
+                            result[:3000]
+                            + "\n... (結果が長すぎるため切り詰められました)"
+                        )
+
                     # 結果を送信
-                    say(f"コマンド `{terminal_command}` の実行結果:\n```\n{result}\n```", thread_ts=thread_ts)
-                    
+                    say(
+                        f"コマンド `{terminal_command}` の実行結果:\n```\n{result}\n```",
+                        thread_ts=thread_ts,
+                    )
+
                     # 会話に保存
-                    ai.save_conversation(f"[ターミナルコマンド] {terminal_command}", result, None)
-                    
+                    ai.save_conversation(
+                        f"[ターミナルコマンド] {terminal_command}", result, None
+                    )
+
                 except Exception as e:
                     error_msg = f"コマンド実行中にエラーが発生しました: {str(e)}"
                     logger.error(error_msg, exc_info=True)
                     say(error_msg, thread_ts=thread_ts)
-            
+
             # 非同期関数を実行
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -2042,9 +2357,62 @@ def process_and_respond(
         intent_analysis = ai.analyze_input_intent(text)
         logger.info(f"入力意図分析結果: {intent_analysis}")
 
-        # 検索タスクの検出
-        is_search_request = intent_analysis["intent_type"] == "search"
+        # 関連する過去の会話履歴を検索
+        logger.info("関連する過去の会話履歴を検索")
+        conversation_history = ai.search_conversation_history(text, limit=5)
+        if conversation_history:
+            logger.info(
+                f"関連する会話履歴が見つかりました: {len(conversation_history)}件"
+            )
+            logger.debug(f"関連会話履歴: {conversation_history[:200]}...")
+        else:
+            logger.info("関連する会話履歴は見つかりませんでした")
+            conversation_history = ""
 
+        # 関連するメモリー情報を検索
+        logger.info("関連するメモリー情報を検索")
+        memory_results = ai.search_memory(text)
+        if memory_results:
+            logger.info(f"関連するメモリーが見つかりました: {len(memory_results)}件")
+            logger.debug(f"関連メモリー: {memory_results[:200]}...")
+        else:
+            logger.info("関連するメモリーは見つかりませんでした")
+            memory_results = ""
+
+        # 「どこ」「場所」などの位置情報に関する質問や「HHKB」に関する質問かを判断
+        location_terms = [
+            "どこ",
+            "場所",
+            "どこに",
+            "置いてある",
+            "ある",
+            "あるか",
+            "どこにある",
+            "見つから",
+            "見当たら",
+        ]
+        has_location_terms = any(term in text for term in location_terms)
+
+        # 位置情報に関する質問で、かつ会話履歴やメモリーに関連情報がある場合は
+        # 検索ではなく会話として処理する
+        is_search_request = intent_analysis["intent_type"] == "search"
+        if (
+            is_search_request
+            and has_location_terms
+            and (conversation_history or memory_results)
+        ):
+            logger.info(
+                f"位置情報に関する質問を検出しました。関連する履歴やメモリーから回答します: '{text}'"
+            )
+            is_search_request = False
+            # 意図タイプを会話に変更
+            intent_analysis["intent_type"] = "conversation"
+            intent_analysis["explanation"] = (
+                "位置情報に関する質問ですが、過去の会話履歴やメモリーから回答できるため会話として処理します"
+            )
+            logger.info(f"意図タイプを更新: {intent_analysis}")
+
+        # 検索タスクの検出（位置情報判定の後に実行）
         if is_search_request:
             # 検索タスクとして処理
             logger.info(f"検索リクエスト検出: '{text}'")
@@ -2101,7 +2469,52 @@ def process_and_respond(
             handle_browser_use(ai, search_task, user_id, channel_id, thread_ts, say)
             return
 
-        response = ai.generate_response(text)
+        # プロファイル情報を取得
+        logger.info("ユーザープロファイル情報を取得")
+        profile_info = ai.get_profile_info()
+        if profile_info:
+            logger.info("プロファイル情報が取得できました")
+            logger.debug(f"プロファイル情報: {profile_info[:200]}...")
+        else:
+            logger.info("プロファイル情報は見つかりませんでした")
+            profile_info = ""
+
+        # 最近の会話履歴を取得（直近の数回）
+        logger.info("最近の会話履歴を取得")
+        recent_conversations = ai.get_recent_conversations()
+        if recent_conversations:
+            logger.info(f"最近の会話が取得できました: {len(recent_conversations)}件")
+            logger.debug(f"最近の会話: {recent_conversations[:200]}...")
+        else:
+            logger.info("最近の会話は見つかりませんでした")
+            recent_conversations = ""
+
+        # コンテキスト情報を統合
+        context_info = get_context_info()
+        integrated_context = f"""
+現在の日時: {context_info['current_datetime']} ({context_info['day_of_week']})
+現在位置: {context_info['location']}
+
+## ユーザープロファイル
+{profile_info}
+
+## 関連する過去の会話
+{conversation_history}
+
+## 最近の会話
+{recent_conversations}
+
+## 関連するメモリー
+{memory_results}
+"""
+        logger.info("統合されたコンテキスト情報を作成しました")
+        logger.debug(f"統合コンテキスト: {integrated_context[:300]}...")
+
+        # 拡張プロンプトを使用して応答を生成
+        enhanced_prompt = f"{integrated_context}\n\nユーザーからの質問/発言: {text}"
+        logger.info("拡張プロンプトを使用して応答を生成します")
+
+        response = ai.generate_response(text, context=integrated_context)
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
         logger.info(
@@ -3465,7 +3878,7 @@ def start_slack_bot():
     # MCPコントローラの初期化（非同期なので別スレッドで実行）
     if MCP_AVAILABLE:
         logger.info("MCPコントローラを初期化しています...")
-        
+
         def init_mcp_controller():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -3476,11 +3889,11 @@ def start_slack_bot():
                 logger.error(f"MCPコントローラの初期化に失敗: {str(e)}", exc_info=True)
             finally:
                 loop.close()
-        
+
         # 別スレッドでMCPコントローラを初期化
         mcp_init_thread = threading.Thread(target=init_mcp_controller, daemon=True)
         mcp_init_thread.start()
-    
+
     try:
         logger.info("Slackボットを起動中...")
 
@@ -3514,7 +3927,7 @@ def start_slack_bot_in_background():
     # MCPコントローラの初期化（非同期なので別スレッドで実行）
     if MCP_AVAILABLE:
         logger.info("MCPコントローラを初期化しています...")
-        
+
         def init_mcp_controller():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -3525,11 +3938,11 @@ def start_slack_bot_in_background():
                 logger.error(f"MCPコントローラの初期化に失敗: {str(e)}", exc_info=True)
             finally:
                 loop.close()
-        
+
         # 別スレッドでMCPコントローラを初期化
         mcp_init_thread = threading.Thread(target=init_mcp_controller, daemon=True)
         mcp_init_thread.start()
-    
+
     def run_bot():
         try:
             # ボットを起動したらステータスを「起動中！」に設定

@@ -26,6 +26,8 @@ dependencies = [
     "browser-use==0.1.40",
     "langchain-openai==0.3.1",
     "langchain-core>=0.3.46",
+    "mcp>=1.4.1",
+    "langchain-mcp-adapters>=0.0.5",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"

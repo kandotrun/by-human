@@ -181,9 +181,12 @@ langchain-core==0.3.46
     # via langchain-anthropic
     # via langchain-chroma
     # via langchain-community
+    # via langchain-mcp-adapters
     # via langchain-ollama
     # via langchain-openai
     # via langchain-text-splitters
+langchain-mcp-adapters==0.0.5
+    # via core
 langchain-ollama==0.2.2
     # via browser-use
     # via core
@@ -208,7 +211,9 @@ matplotlib==3.10.1
     # via seaborn
     # via ultralytics
 mcp==1.4.1
+    # via core
     # via dolphin-mcp
+    # via langchain-mcp-adapters
 mdurl==0.1.2
     # via markdown-it-py
 mmh3==5.1.0

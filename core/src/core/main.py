@@ -1342,6 +1342,28 @@ class PersonalAI:
         if text.startswith("/"):
             return {"intent_type": "command", "confidence": 1.0, "command": text}
 
+        # 「どこ」「場所」などの位置情報に関する質問を判断
+        location_terms = [
+            "どこ",
+            "場所",
+            "どこに",
+            "置いてある",
+            "ある",
+            "あるか",
+            "どこにある",
+            "見つから",
+            "見当たら",
+        ]
+        has_location_terms = any(term in text for term in location_terms)
+
+        # 位置情報に関する質問は、まず会話として処理
+        if has_location_terms:
+            return {
+                "intent_type": "conversation",
+                "confidence": 0.9,
+                "explanation": "所有物や位置情報に関する質問なので会話として処理",
+            }
+
         # プロンプト作成
         prompt = PromptTemplate(
             input_variables=["text"],
@@ -1360,11 +1382,11 @@ class PersonalAI:
 }}
 
 - "command": ユーザーが特定の機能や操作を実行するよう明示的に指示している
-- "search": ユーザーが情報を探したり調べたりすることを求めている
+- "search": ユーザーが情報を探したり調べたりすることを求めている。ただし、過去の会話履歴やメモリーから回答できる位置情報に関する質問（「どこにある？」など）は会話として扱う。
 - "conversation": 一般的な会話や雑談、質問
 
-注意: 「~を見せて」「~について教えて」などの表現があっても、それが単なる会話の一部である可能性もあります。
-コンテキストから判断してください。
+注意: 「~を見せて」「~について教えて」「~はどこ？」などの表現があっても、それが単なる会話の一部である可能性もあります。
+コンテキストから判断してください。特に位置情報を尋ねる質問は、過去の知識で答えられる可能性があるため、基本的に会話として扱います。
 """,
         )
 
@@ -1741,12 +1763,13 @@ JSONで以下の形式で応答してください：
         else:
             return f"不明なサブコマンド: {subcommand}"
 
-    def generate_response(self, human_input: str) -> str:
+    def generate_response(self, human_input: str, context: str = None) -> str:
         """
         ユーザーの入力に基づいてAIの応答を生成
 
         Args:
             human_input: ユーザーの入力
+            context: 追加のコンテキスト情報（オプション）
 
         Returns:
             AIの応答
@@ -1805,6 +1828,14 @@ JSONで以下の形式で応答してください：
         except Exception:
             pass
 
+        # 追加のコンテキスト情報があれば使用
+        additional_context = ""
+        if context:
+            additional_context = f"""
+## 追加コンテキスト情報
+{context}
+"""
+
         # プロンプト作成
         prompt = PromptTemplate(
             input_variables=[
@@ -1817,11 +1848,13 @@ JSONで以下の形式で応答してください：
                 "day_of_week",
                 "location",
                 "related_memories",
+                "additional_context",
             ],
             template="""
 ユーザーの質問に対して、保存されている情報と会話履歴に基づいて役立つ応答を生成してください。
 ユーザーの好みやプロファイル情報を考慮してください。
 特に関連性の高い記憶を適切に活用してください。
+過去の会話履歴を参照し、会話の連続性を保つようにしてください。
 
 ## システム情報
 現在日時: {current_datetime} ({day_of_week})
@@ -1838,6 +1871,7 @@ JSONで以下の形式で応答してください：
 
 ## 最近の会話
 {recent_conversations}
+{additional_context}
 
 ## 現在の会話履歴
 {history}
@@ -1867,6 +1901,7 @@ JSONで以下の形式で応答してください：
             day_of_week=current_day_of_week,
             location=location_info,
             related_memories=related_memories,
+            additional_context=additional_context,
         )
 
         # 記憶すべき情報があるか検出
@@ -1995,6 +2030,97 @@ JSONで以下の形式で応答してください：
         except Exception as e:
             print(f"リンク処理中にエラーが発生しました: {str(e)}")
             return f"リンク処理中にエラーが発生しました: {str(e)}"
+
+    def search_memory(self, query: str, limit: int = 5) -> str:
+        """
+        キーワードに関連するメモリー情報を検索
+
+        Args:
+            query: 検索クエリ
+            limit: 取得する結果の最大数
+
+        Returns:
+            関連するメモリー情報のテキスト
+        """
+        try:
+            # ベクトル検索を使用してメモリーを検索
+            results = self.memory.vector_memory.search(query, k=limit)
+
+            if not results:
+                return ""
+
+            # 結果を整形
+            formatted_results = []
+            for result in results:
+                content = result["content"]
+                metadata = result["metadata"]
+                metadata_type = metadata.get("type", "不明")
+
+                if metadata_type == "profile":
+                    key = metadata.get("key", "不明")
+                    value = metadata.get("value", "不明")
+                    formatted_results.append(f"- プロファイル: {key}: {value}")
+                elif metadata_type == "conversation":
+                    timestamp = metadata.get("timestamp", "不明")
+                    human_input = metadata.get("human_input", "不明")
+                    ai_output = metadata.get("ai_output", "不明")
+                    formatted_results.append(
+                        f"- 会話 ({timestamp}): ユーザー「{human_input}」→ AI「{ai_output}」"
+                    )
+                else:
+                    formatted_results.append(f"- その他: {content}")
+
+            return "\n".join(formatted_results)
+        except Exception as e:
+            print(f"メモリー検索エラー: {str(e)}")
+            return ""
+
+    def search_conversation_history(self, query: str, limit: int = 5) -> str:
+        """
+        キーワードに関連する会話履歴を検索
+
+        Args:
+            query: 検索クエリ
+            limit: 取得する結果の最大数
+
+        Returns:
+            関連する会話履歴のテキスト
+        """
+        try:
+            # ベクトル検索を使用して会話を検索
+            results = self.memory.vector_memory.search_conversations(query, k=limit)
+
+            if not results:
+                return ""
+
+            # 結果を整形
+            formatted_results = []
+            for result in results:
+                metadata = result["metadata"]
+                timestamp = metadata.get("timestamp", "不明")
+                human_input = metadata.get("human_input", "不明")
+                ai_output = metadata.get("ai_output", "不明")
+                formatted_results.append(
+                    f"- 会話 ({timestamp}):\n  ユーザー: {human_input}\n  AI: {ai_output}"
+                )
+
+            return "\n".join(formatted_results)
+        except Exception as e:
+            print(f"会話履歴検索エラー: {str(e)}")
+            return ""
+
+    def get_profile_info(self) -> str:
+        """
+        ユーザーのプロファイル情報を取得
+
+        Returns:
+            プロファイル情報の文字列
+        """
+        try:
+            return self.get_profile()
+        except Exception as e:
+            print(f"プロファイル情報の取得中にエラー: {str(e)}")
+            return ""
 
 
 if __name__ == "__main__":
