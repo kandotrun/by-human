@@ -12,15 +12,18 @@ is a reference; running Pi, OpenClaw or Mukumo is not required.
 The Rust server now provides its own ChatGPT-plan login, PostgreSQL conversation
 and run storage, an authenticated HTTP API, streamed text, a bounded model/tool
 loop, Stop, durable event replay and conservative restart recovery. The initial
-tool only reads the current UTC time. This is an initial backend, not feature
+tool reads the current UTC time. Owner-configured MCP tools can be added through
+stdio or Streamable HTTP, with explicit tool selection and durable receipts.
+This is an initial backend, not feature
 parity with OpenClaw or a measured performance claim.
 
 ChatGPTプランでの独自ログイン、会話・実行状態の保存、HTTP API、テキスト配信、
-停止、イベント再取得、再起動後の復旧を実装しています。初期ツールは時刻取得だけです。
+停止、イベント再取得、再起動後の復旧を実装しています。時刻取得に加え、設定した
+MCPサーバーのツールをstdio／Streamable HTTPで接続できます。
 OpenClawの全面置換や性能改善の実証は、今後の接続・運用検証として扱います。
 
 See [architecture](docs/architecture.md), [login](docs/openai-login.md) and
-[HTTP API](docs/http-api.md) for the current behavior and limits.
+[HTTP API](docs/http-api.md) and [MCP tools](docs/mcp.md) for the current behavior and limits.
 
 ## Development
 

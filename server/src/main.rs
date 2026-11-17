@@ -5,7 +5,8 @@ use by_human::{
     auth::AuthManager,
     authenticated_model::ChatGptModel,
     config::Config,
-    engine::{AuthMode, Engine, Limits, Model, OpenAIProvider, ProviderConfig},
+    engine::{AuthMode, Engine, Limits, Model, OpenAIProvider, ProviderConfig, ToolRegistry},
+    mcp::{McpConnections, config::McpConfig},
     runner::Runner,
     store::Store,
 };
@@ -23,6 +24,7 @@ async fn main() -> std::process::ExitCode {
             outcome(login(args.get(1).map(String::as_str)).await)
         }
         Some("auth-status") if args.len() == 1 => outcome(auth_status().await),
+        Some("mcp") if args.as_slice() == ["mcp", "list"] => outcome(mcp_list().await),
         Some("serve" | "check") if args.len() != 1 => {
             eprintln!("by-human: unexpected arguments; use --help");
             std::process::ExitCode::FAILURE
@@ -52,7 +54,7 @@ async fn main() -> std::process::ExitCode {
         }
         None | Some("--help" | "-h") => {
             println!(
-                "Usage: by-human <login|auth-status|check|serve>\n\nlogin [--enable-plan|--new-registration]  Sign in or explicitly request plan consent.\nauth-status  Show safe OpenAI login readiness.\ncheck        Apply PostgreSQL migrations and check readiness.\nserve        Start the authenticated HTTP API and single-owner runner."
+                "Usage: by-human <login|auth-status|mcp list|check|serve>\n\nlogin [--enable-plan|--new-registration]  Sign in or explicitly request plan consent.\nauth-status  Show safe OpenAI login readiness.\nmcp list     Connect configured MCP servers and list the enabled tools.\ncheck        Apply PostgreSQL migrations and check readiness.\nserve        Start the authenticated HTTP API and single-owner runner."
             );
             std::process::ExitCode::SUCCESS
         }
@@ -118,8 +120,26 @@ async fn auth_status() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Discovery needs only the explicit MCP configuration, not model credentials
+/// or a database. No tool is called by this command.
+async fn mcp_list() -> anyhow::Result<()> {
+    let config = McpConfig::from_env()?;
+    let cancel = CancellationToken::new();
+    let mut connections = tokio::select! {
+        result = McpConnections::connect(&config, &cancel) => result?,
+        _ = shutdown_signal() => {
+            cancel.cancel();
+            anyhow::bail!("MCP discovery was cancelled");
+        }
+    };
+    println!("{}", serde_json::json!({"tools":connections.tools()}));
+    connections.shutdown().await?;
+    Ok(())
+}
+
 async fn serve() -> anyhow::Result<()> {
     let config = Config::from_env()?;
+    let mcp_config = McpConfig::from_env()?;
     let mut auth_manager = None;
     let model: Arc<dyn Model> = match config.openai_auth {
         AuthMode::ChatGptPlan => {
@@ -144,14 +164,31 @@ async fn serve() -> anyhow::Result<()> {
     let store = Store::connect(&config.database_url)
         .await
         .map_err(|_| anyhow::anyhow!("PostgreSQL could not be initialized"))?;
-    let engine = Arc::new(Engine::new(model, Limits::default()));
+    let shutdown = CancellationToken::new();
+    // Register termination while MCP starts, so an interrupted handshake also
+    // drops its owned process/connection instead of leaving an orphan.
+    let signal = shutdown_signal();
+    tokio::pin!(signal);
+    let mut connections = tokio::select! {
+        result = McpConnections::connect(&mcp_config, &shutdown) => result?,
+        _ = &mut signal => {
+            shutdown.cancel();
+            anyhow::bail!("server startup was cancelled");
+        }
+    };
+    let mut tools = ToolRegistry::default();
+    connections.register(&mut tools)?;
+    let engine = Arc::new(Engine::with_tools(
+        model,
+        Limits::default(),
+        Arc::new(tools),
+    ));
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .map_err(|_| anyhow::anyhow!("HTTP listener could not be bound"))?;
     let listening_at = listener
         .local_addr()
         .map_err(|_| anyhow::anyhow!("HTTP listener address is unavailable"))?;
-    let shutdown = CancellationToken::new();
     let runner = Runner::start(store.clone(), engine, shutdown.clone()).await?;
     let fatal = runner.fatal_token();
     let state = ApiState::new(store, config.api_token, runner.notifier())
@@ -165,12 +202,15 @@ async fn serve() -> anyhow::Result<()> {
     println!("by-human: HTTP API is ready at {listening_at}");
     let mut http_finished = false;
     let mut failed = tokio::select! {
-        result = shutdown_signal() => result.is_err(),
+        result = &mut signal => result.is_err(),
         _ = fatal.cancelled() => true,
         _ = &mut http => { http_finished = true; true },
     };
     shutdown.cancel();
     if runner.shutdown().await.is_err() {
+        failed = true;
+    }
+    if connections.shutdown().await.is_err() {
         failed = true;
     }
     // SSE clients can retain a connection indefinitely. Durability is settled

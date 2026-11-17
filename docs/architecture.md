@@ -14,8 +14,11 @@ Small Graphite changes build up the first runnable slice:
 3. An authenticated local HTTP API with stop, event replay and restart recovery.
 4. The application's own ChatGPT-plan OAuth login and serialized token refresh.
 
-The first tool only reads the current time. Shell execution, browser automation,
-MCP, Every, scheduling, push notifications and the iOS adapter are later changes.
+The built-in tool reads the current time. A shared tool registry also accepts
+owner-selected MCP tools through stdio or Streamable HTTP; its same definitions
+are advertised to OpenAI and used for validation and dispatch. Every/Zenkioku is
+not part of the integration scope. Shell execution, browser automation,
+scheduling, push notifications and the iOS adapter are later changes.
 No claim of feature parity or performance improvement is made by this first slice.
 
 ## State ownership
@@ -39,6 +42,12 @@ blocks that conversation until reconciliation is implemented; a new conversation
 can still be used. Canonical context is bounded to 256 completed turns or 2 MiB;
 exceeding the bound fails explicitly instead of silently dropping history.
 
+MCP connection configuration is local and explicit. Only listed tools are
+registered; neither discovery nor model output expands that authority. A remote
+tool's annotation is not treated as permission. The MCP client does not borrow
+OpenAI credentials, provide model sampling, or expose filesystem roots. See
+[MCP tools](mcp.md) for configuration, transport and cancellation limits.
+
 ## OpenAI boundary
 
 The server talks directly to the public Responses API. API-key and ChatGPT-plan
@@ -57,8 +66,8 @@ Sources: [Responses tool flow](https://developers.openai.com/api/docs/guides/fun
 
 ## Deployment boundary
 
-Development and contract tests use an isolated PostgreSQL instance and synthetic
-model streams. Public deployment, existing OpenClaw data migration, private Every
-access and production cutover are separate actions. Runtime secrets are supplied
+Development and contract tests use an isolated PostgreSQL instance, synthetic
+model streams and dedicated MCP fixtures. Public deployment, existing OpenClaw
+data migration and production cutover are separate actions. Runtime secrets are supplied
 through the environment or the dedicated protected OAuth store, and never
 committed or written to the execution log.

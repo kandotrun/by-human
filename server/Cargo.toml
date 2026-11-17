@@ -1,5 +1,6 @@
 [package]
 name = "by-human"
+default-run = "by-human"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,17 @@ autotests = false
 
 [features]
 postgres-tests = []
+mcp-test-fixture = []
+
+[[bin]]
+name = "by-human-mcp-fixture"
+path = "tests/fixtures/mcp_stdio.rs"
+required-features = ["mcp-test-fixture"]
+
+[[test]]
+name = "mcp_runtime"
+path = "tests/mcp_runtime.rs"
+required-features = ["postgres-tests", "mcp-test-fixture"]
 
 [[test]]
 name = "postgres_store"
@@ -35,11 +47,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 subtle = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+rmcp = { version = "3.10.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client-reqwest"] }
+jsonschema = { version = "0.61.2", default-features = false }
+sse-stream = "0.2.6"
 
 [dev-dependencies]
 aws-lc-rs = "1"

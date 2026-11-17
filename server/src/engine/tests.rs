@@ -55,10 +55,12 @@ impl RuntimeSink for Sink {
             Ok(())
         }
     }
-    async fn after_tool(&self, _: &ToolCall, result: &str) -> Result<()> {
+    async fn after_tool(&self, call: &ToolCall, result: &str) -> Result<()> {
         self.after.fetch_add(1, Ordering::SeqCst);
-        let result: Value = serde_json::from_str(result).unwrap();
-        assert!(chrono::DateTime::parse_from_rfc3339(result["utc"].as_str().unwrap()).is_ok());
+        if call.name == "get_current_time" {
+            let result: Value = serde_json::from_str(result).unwrap();
+            assert!(chrono::DateTime::parse_from_rfc3339(result["utc"].as_str().unwrap()).is_ok());
+        }
         if let Some(token) = &self.stop_after_receipt {
             token.cancel();
         }
@@ -170,8 +172,21 @@ async fn refreshed_token_preserves_plan_wire_options_and_original_provider() {
     let refreshed = original.with_access_token("fixture-refreshed").unwrap();
     let sink = Sink::default();
     let cancel = CancellationToken::new();
-    refreshed.turn(&input(), &sink, &cancel).await.unwrap();
-    original.turn(&input(), &sink, &cancel).await.unwrap();
+    let mut registry = ToolRegistry::default();
+    registry
+        .register(Arc::new(CustomTool::new(CustomResult::Definitive(
+            "{}".into(),
+        ))))
+        .unwrap();
+    let tools = registry.definitions();
+    refreshed
+        .turn(&input(), &tools, &sink, &cancel)
+        .await
+        .unwrap();
+    original
+        .turn(&input(), &tools, &sink, &cancel)
+        .await
+        .unwrap();
 
     assert_eq!(
         *fixture.state.authorizations.lock().unwrap(),
@@ -180,6 +195,10 @@ async fn refreshed_token_preserves_plan_wire_options_and_original_provider() {
     let requests = fixture.state.requests.lock().unwrap();
     assert_eq!(requests[0], requests[1]);
     assert_eq!(requests[0]["tools"][0]["type"], "namespace");
+    assert_eq!(
+        requests[0]["tools"][0]["tools"][1]["name"],
+        "mcp_fixture_echo"
+    );
     assert!(requests[0].get("max_output_tokens").is_none());
 }
 
@@ -730,4 +749,323 @@ fn fixture_endpoint_cannot_send_credentials_to_remote_or_named_hosts() {
             .is_err()
         );
     }
+}
+
+enum CustomResult {
+    Definitive(String),
+    Unknown,
+    WaitForStop(Arc<tokio::sync::Notify>),
+    StopWithResult(String),
+}
+
+struct CustomTool {
+    name: String,
+    calls: Arc<AtomicUsize>,
+    result: CustomResult,
+}
+
+impl CustomTool {
+    fn new(result: CustomResult) -> Self {
+        Self {
+            name: "mcp_fixture_echo".into(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            result,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for CustomTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.clone(),
+            description: "Echo a configured fixture value.".into(),
+            parameters: json!({
+                "type":"object", "properties":{"text":{"type":"string"}},
+                "required":["text"], "additionalProperties":false
+            }),
+            strict: false,
+        }
+    }
+
+    fn validate_arguments(&self, arguments: &Value) -> Result<()> {
+        if arguments.as_object().is_some_and(|value| value.len() == 1)
+            && arguments["text"].is_string()
+        {
+            Ok(())
+        } else {
+            Err(EngineError::new(
+                EngineErrorKind::Tool,
+                "fixture arguments are invalid",
+            ))
+        }
+    }
+
+    async fn execute(&self, _: &Value, cancel: &CancellationToken) -> Result<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match &self.result {
+            CustomResult::Definitive(result) => Ok(result.clone()),
+            CustomResult::Unknown => Err(EngineError::new(
+                EngineErrorKind::Tool,
+                "tool outcome is unknown",
+            )),
+            CustomResult::WaitForStop(entered) => {
+                entered.notify_one();
+                cancel.cancelled().await;
+                Err(EngineError::cancelled())
+            }
+            CustomResult::StopWithResult(result) => {
+                cancel.cancel();
+                Ok(result.clone())
+            }
+        }
+    }
+}
+
+fn custom_call(id: &str, name: &str, arguments: Value) -> Value {
+    json!({
+        "type":"function_call", "call_id":id, "name":name,
+        "arguments":arguments.to_string(), "status":"completed"
+    })
+}
+
+#[tokio::test]
+async fn registered_tools_share_the_advertised_catalog_and_keep_definitive_results() {
+    for mode in [AuthMode::ApiKey, AuthMode::ChatGptPlan] {
+        // A remote isError result is a definitive receipt, not a local transport
+        // failure. Preserve it for the model to interpret on the next turn.
+        let tool_result =
+            json!({"isError":true,"content":[{"type":"text","text":"fixture tool refused input"}]})
+                .to_string();
+        let tool = Arc::new(CustomTool::new(CustomResult::Definitive(
+            tool_result.clone(),
+        )));
+        let mut registry = ToolRegistry::default();
+        registry.register(tool.clone()).unwrap();
+        let mut call = custom_call("remote-1", &tool.name, json!({"text":"日本語"}));
+        if mode == AuthMode::ChatGptPlan {
+            call["namespace"] = json!("by_human");
+        }
+        let fixture = Fixture::start(vec![
+            vec![complete(vec![call])],
+            vec![complete(vec![message("確認しました")])],
+        ])
+        .await;
+        let sink = Sink::default();
+        let result = Engine::with_tools(
+            Arc::new(fixture.provider(mode)),
+            Limits::default(),
+            Arc::new(registry),
+        )
+        .run(input(), &sink, CancellationToken::new())
+        .await
+        .unwrap();
+        assert_eq!(result.text, "確認しました");
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.before.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.after.load(Ordering::SeqCst), 1);
+        assert_eq!(result.new_items[1]["type"], "function_call_output");
+        assert_eq!(result.new_items[1]["output"], tool_result);
+        let requests = fixture.state.requests.lock().unwrap();
+        let advertised = if mode == AuthMode::ChatGptPlan {
+            &requests[0]["tools"][0]["tools"]
+        } else {
+            &requests[0]["tools"]
+        };
+        assert_eq!(advertised.as_array().unwrap().len(), 2);
+        assert_eq!(advertised[0]["name"], "get_current_time");
+        assert_eq!(advertised[1]["name"], tool.name);
+        assert_eq!(advertised[1]["parameters"], tool.definition().parameters);
+        assert_eq!(advertised[1]["strict"], false);
+        assert_eq!(requests[1]["tools"], requests[0]["tools"]);
+        assert_eq!(requests[1]["input"][2], result.new_items[1]);
+    }
+}
+
+#[tokio::test]
+async fn configured_tool_batches_are_all_validated_before_any_dispatch() {
+    let tool = Arc::new(CustomTool::new(CustomResult::Definitive("{}".into())));
+    let mut registry = ToolRegistry::default();
+    registry.register(tool.clone()).unwrap();
+    let registry = Arc::new(registry);
+    let mut bad_namespace = custom_call("remote-2", &tool.name, json!({"text":"ok"}));
+    bad_namespace["namespace"] = json!("unconfigured");
+    for invalid in [
+        custom_call("remote-2", "mcp_unregistered", json!({"text":"ok"})),
+        custom_call("remote-2", &tool.name, json!({"wrong":"shape"})),
+        custom_call(
+            "remote-2",
+            &tool.name,
+            json!({"text":"x".repeat(MAX_TOOL_ARGUMENT_BYTES)}),
+        ),
+        bad_namespace,
+    ] {
+        let fixture = Fixture::start(vec![vec![complete(vec![
+            custom_call("remote-1", &tool.name, json!({"text":"valid"})),
+            invalid,
+        ])]])
+        .await;
+        let sink = Sink::default();
+        let error = Engine::with_tools(
+            Arc::new(fixture.provider(AuthMode::ApiKey)),
+            Limits::default(),
+            registry.clone(),
+        )
+        .run(input(), &sink, CancellationToken::new())
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, EngineErrorKind::Tool);
+        assert_eq!(sink.before.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.after.load(Ordering::SeqCst), 0);
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn unknown_or_oversized_tool_results_leave_the_accepted_intent_unsettled() {
+    for (result, kind) in [
+        (CustomResult::Unknown, EngineErrorKind::Tool),
+        (
+            CustomResult::Definitive("x".repeat(MAX_TOOL_RESULT_BYTES + 1)),
+            EngineErrorKind::Limit,
+        ),
+    ] {
+        let tool = Arc::new(CustomTool::new(result));
+        let mut registry = ToolRegistry::default();
+        registry.register(tool.clone()).unwrap();
+        let fixture = Fixture::start(vec![vec![complete(vec![custom_call(
+            "remote-1",
+            &tool.name,
+            json!({"text":"valid"}),
+        )])]])
+        .await;
+        let sink = Sink::default();
+        let error = Engine::with_tools(
+            Arc::new(fixture.provider(AuthMode::ApiKey)),
+            Limits::default(),
+            Arc::new(registry),
+        )
+        .run(input(), &sink, CancellationToken::new())
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, kind);
+        assert_eq!(sink.before.load(Ordering::SeqCst), 1);
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.after.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn stop_cancels_an_async_tool_without_inventing_a_receipt() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let tool = Arc::new(CustomTool::new(CustomResult::WaitForStop(entered.clone())));
+    let mut registry = ToolRegistry::default();
+    registry.register(tool.clone()).unwrap();
+    let fixture = Fixture::start(vec![vec![complete(vec![custom_call(
+        "remote-1",
+        &tool.name,
+        json!({"text":"valid"}),
+    )])]])
+    .await;
+    let sink = Sink::default();
+    let token = CancellationToken::new();
+    let engine = Engine::with_tools(
+        Arc::new(fixture.provider(AuthMode::ApiKey)),
+        Limits::default(),
+        Arc::new(registry),
+    );
+    let run = engine.run(input(), &sink, token.clone());
+    let stop = async {
+        entered.notified().await;
+        token.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(run, stop) })
+            .await
+            .unwrap();
+    assert_eq!(result.unwrap_err().kind, EngineErrorKind::Cancelled);
+    assert_eq!(sink.before.load(Ordering::SeqCst), 1);
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.after.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn async_tool_deadline_leaves_the_intent_unsettled() {
+    let tool = Arc::new(CustomTool::new(CustomResult::WaitForStop(Arc::new(
+        tokio::sync::Notify::new(),
+    ))));
+    let mut registry = ToolRegistry::default();
+    registry.register(tool.clone()).unwrap();
+    let fixture = Fixture::start(vec![vec![complete(vec![custom_call(
+        "remote-1",
+        &tool.name,
+        json!({"text":"valid"}),
+    )])]])
+    .await;
+    let sink = Sink::default();
+    let limits = Limits {
+        max_duration: Duration::from_millis(100),
+        ..Limits::default()
+    };
+    let error = Engine::with_tools(
+        Arc::new(fixture.provider(AuthMode::ApiKey)),
+        limits,
+        Arc::new(registry),
+    )
+    .run(input(), &sink, CancellationToken::new())
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind, EngineErrorKind::Persistence);
+    assert_eq!(sink.before.load(Ordering::SeqCst), 1);
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.after.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn stop_racing_a_definitive_async_result_keeps_its_receipt() {
+    let tool = Arc::new(CustomTool::new(CustomResult::StopWithResult(
+        "{\"isError\":false}".into(),
+    )));
+    let mut registry = ToolRegistry::default();
+    registry.register(tool.clone()).unwrap();
+    let fixture = Fixture::start(vec![vec![complete(vec![custom_call(
+        "remote-1",
+        &tool.name,
+        json!({"text":"valid"}),
+    )])]])
+    .await;
+    let sink = Sink::default();
+    let error = Engine::with_tools(
+        Arc::new(fixture.provider(AuthMode::ApiKey)),
+        Limits::default(),
+        Arc::new(registry),
+    )
+    .run(input(), &sink, CancellationToken::new())
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind, EngineErrorKind::Cancelled);
+    assert_eq!(sink.before.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.after.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn registry_rejects_duplicate_and_invalid_names_without_replacing_tools() {
+    let mut registry = ToolRegistry::default();
+    for name in [
+        "",
+        "contains.dot",
+        "日本語",
+        &"x".repeat(65),
+        "get_current_time",
+    ] {
+        let mut tool = CustomTool::new(CustomResult::Definitive("{}".into()));
+        tool.name = name.into();
+        assert!(registry.register(Arc::new(tool)).is_err());
+    }
+    assert_eq!(registry.definitions().len(), 1);
+    assert_eq!(registry.definitions()[0].name, "get_current_time");
 }

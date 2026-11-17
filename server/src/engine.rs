@@ -6,6 +6,7 @@
 
 mod provider;
 mod sse;
+mod tools;
 
 use std::{collections::HashSet, fmt, sync::Arc, time::Duration};
 
@@ -15,6 +16,9 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 pub use provider::{AuthMode, OpenAIProvider, ProviderConfig};
+pub use tools::{
+    MAX_TOOL_ARGUMENT_BYTES, MAX_TOOL_RESULT_BYTES, Tool, ToolDefinition, ToolRegistry,
+};
 
 pub type Result<T> = std::result::Result<T, EngineError>;
 
@@ -103,6 +107,7 @@ pub trait Model: Send + Sync {
     async fn turn(
         &self,
         input: &[Value],
+        tools: &[ToolDefinition],
         sink: &dyn RuntimeSink,
         cancel: &CancellationToken,
     ) -> Result<ModelTurn>;
@@ -136,11 +141,20 @@ pub struct EngineResult {
 pub struct Engine {
     model: Arc<dyn Model>,
     limits: Limits,
+    tools: Arc<ToolRegistry>,
 }
 
 impl Engine {
     pub fn new(model: Arc<dyn Model>, limits: Limits) -> Self {
-        Self { model, limits }
+        Self::with_tools(model, limits, Arc::new(ToolRegistry::default()))
+    }
+
+    pub fn with_tools(model: Arc<dyn Model>, limits: Limits, tools: Arc<ToolRegistry>) -> Self {
+        Self {
+            model,
+            limits,
+            tools,
+        }
     }
 
     pub async fn run(
@@ -185,14 +199,15 @@ impl Engine {
             usage: vec![],
         };
         let mut calls_seen = HashSet::new();
+        let definitions = self.tools.definitions();
         for request in 1..=self.limits.max_model_requests {
             checkpoint(sink, cancel).await?;
             sink.emit(RuntimeEvent::ModelStarted { request }).await?;
             checkpoint(sink, cancel).await?;
-            let turn = self.model.turn(&input, sink, cancel).await?;
+            let turn = self.model.turn(&input, &definitions, sink, cancel).await?;
             checkpoint(sink, cancel).await?;
             // Validate the entire batch before any tool, including duplicate IDs.
-            let calls = parse_calls(&turn.output, &calls_seen)?;
+            let calls = parse_calls(&turn.output, &calls_seen, &self.tools)?;
             append_bounded(
                 &mut result.new_items,
                 &turn.output,
@@ -225,14 +240,11 @@ impl Engine {
                 })
                 .await?;
                 checkpoint(sink, cancel).await?;
-                // The durable intent is the dispatch reservation. Once accepted,
-                // finish this synchronous read-only tool and persist its receipt
-                // even if Stop arrives; do not abandon an accepted intent.
+                // An accepted intent is the dispatch reservation. A definitive
+                // result is persisted even when Stop races it; an error leaves
+                // the intent unsettled for conservative recovery by the host.
                 sink.before_tool(&call).await?;
-                // The sole initial tool is read-only and cannot spawn a process,
-                // browse, or use host credentials. More tools require a separate
-                // authority/termination design at this boundary.
-                let tool_result = json!({ "utc": chrono::Utc::now().to_rfc3339() }).to_string();
+                let tool_result = self.tools.execute(&call, cancel).await?;
                 sink.after_tool(&call, &tool_result).await?;
                 calls_seen.insert(call.call_id.clone());
                 sink.emit(RuntimeEvent::ToolCompleted {
@@ -290,7 +302,11 @@ fn append_bounded(target: &mut Vec<Value>, values: &[Value], limit: usize) -> Re
     Ok(())
 }
 
-fn parse_calls(output: &[Value], previous: &HashSet<String>) -> Result<Vec<ToolCall>> {
+fn parse_calls(
+    output: &[Value],
+    previous: &HashSet<String>,
+    tools: &ToolRegistry,
+) -> Result<Vec<ToolCall>> {
     let mut batch = HashSet::new();
     let mut calls = Vec::new();
     for item in output {
@@ -317,12 +333,10 @@ fn parse_calls(output: &[Value], previous: &HashSet<String>) -> Result<Vec<ToolC
                         ));
                     }
                 };
-                if item.get("name").and_then(Value::as_str) != Some("get_current_time") {
-                    return Err(EngineError::new(
-                        EngineErrorKind::Tool,
-                        "unknown tool was refused",
-                    ));
-                }
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(protocol_error)?;
                 if item
                     .get("status")
                     .and_then(Value::as_str)
@@ -330,27 +344,26 @@ fn parse_calls(output: &[Value], previous: &HashSet<String>) -> Result<Vec<ToolC
                 {
                     return Err(protocol_error());
                 }
-                let arguments: Value = serde_json::from_str(
-                    item.get("arguments")
-                        .and_then(Value::as_str)
-                        .ok_or_else(protocol_error)?,
-                )
-                .map_err(|_| protocol_error())?;
-                if !arguments
-                    .as_object()
-                    .is_some_and(|object| object.is_empty())
-                {
+                let arguments = item
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .ok_or_else(protocol_error)?;
+                if arguments.len() > MAX_TOOL_ARGUMENT_BYTES {
                     return Err(EngineError::new(
                         EngineErrorKind::Tool,
                         "tool arguments failed validation",
                     ));
                 }
-                calls.push(ToolCall {
+                let arguments: Value =
+                    serde_json::from_str(arguments).map_err(|_| protocol_error())?;
+                let call = ToolCall {
                     call_id: id.to_owned(),
-                    name: "get_current_time".into(),
+                    name: name.into(),
                     arguments,
                     namespace,
-                });
+                };
+                tools.validate_call(&call)?;
+                calls.push(call);
             }
             Some("message") => {
                 if item["role"] != "assistant"

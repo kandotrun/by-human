@@ -12,7 +12,9 @@ use std::{
 use async_trait::async_trait;
 use by_human::{
     api::{ApiState, router},
-    engine::{Engine, EngineError, Limits, Model, ModelTurn, RuntimeEvent, RuntimeSink},
+    engine::{
+        Engine, EngineError, Limits, Model, ModelTurn, RuntimeEvent, RuntimeSink, ToolDefinition,
+    },
     runner::{Runner, RunnerHandle},
     store::{Run, RunStatus, Store},
 };
@@ -101,6 +103,7 @@ impl Model for HappyModel {
     async fn turn(
         &self,
         input: &[Value],
+        _: &[ToolDefinition],
         sink: &dyn RuntimeSink,
         _: &CancellationToken,
     ) -> Result<ModelTurn, EngineError> {
@@ -145,6 +148,7 @@ impl Model for DelayedModel {
     async fn turn(
         &self,
         _: &[Value],
+        _: &[ToolDefinition],
         _: &dyn RuntimeSink,
         cancel: &CancellationToken,
     ) -> Result<ModelTurn, EngineError> {
@@ -170,6 +174,7 @@ impl Model for UnresponsiveModel {
     async fn turn(
         &self,
         _: &[Value],
+        _: &[ToolDefinition],
         _: &dyn RuntimeSink,
         _: &CancellationToken,
     ) -> Result<ModelTurn, EngineError> {
@@ -185,6 +190,7 @@ impl Model for OversizedModel {
     async fn turn(
         &self,
         _: &[Value],
+        _: &[ToolDefinition],
         _: &dyn RuntimeSink,
         _: &CancellationToken,
     ) -> Result<ModelTurn, EngineError> {
