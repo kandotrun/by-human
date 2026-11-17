@@ -1,0 +1,49 @@
+name: Rust server
+
+on:
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust.yml'
+  push:
+    branches: [main, 'feat/**']
+    paths:
+      - 'server/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: Rust and PostgreSQL contracts
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: byhuman
+          POSTGRES_PASSWORD: local-test-only
+          POSTGRES_DB: byhuman
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U byhuman -d byhuman'
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://byhuman:local-test-only@127.0.0.1:5432/byhuman
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace --all-features
