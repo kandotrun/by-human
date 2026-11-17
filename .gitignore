@@ -1,1 +1,6 @@
 .idea
+/target/
+/.work/
+.env
+.env.*
+!.env.example
