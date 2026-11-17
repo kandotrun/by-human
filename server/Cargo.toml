@@ -13,6 +13,11 @@ name = "postgres_store"
 path = "tests/postgres_store.rs"
 required-features = ["postgres-tests"]
 
+[[test]]
+name = "http_runtime"
+path = "tests/http_runtime.rs"
+required-features = ["postgres-tests"]
+
 [dependencies]
 anyhow = "1"
 async-stream = "0.3"
