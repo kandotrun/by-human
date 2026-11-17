@@ -1,0 +1,25 @@
+{
+  "servers": [
+    {
+      "id": "notes",
+      "transport": {
+        "type": "stdio",
+        "command": "/absolute/path/to/your-mcp-server",
+        "args": [],
+        "env": ["NOTES_TOKEN"]
+      },
+      "tools": ["read_note"],
+      "timeout_seconds": 30
+    },
+    {
+      "id": "tasks",
+      "transport": {
+        "type": "http",
+        "url": "https://tools.example/mcp",
+        "bearer_token_env": "TASKS_MCP_TOKEN"
+      },
+      "tools": ["get_task"],
+      "timeout_seconds": 30
+    }
+  ]
+}

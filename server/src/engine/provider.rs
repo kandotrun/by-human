@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    EngineError, EngineErrorKind, Model, ModelTurn, Result, RuntimeEvent, RuntimeSink, checkpoint,
-    protocol_error, sse::Decoder,
+    EngineError, EngineErrorKind, Model, ModelTurn, Result, RuntimeEvent, RuntimeSink,
+    ToolDefinition, checkpoint, protocol_error, sse::Decoder,
 };
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -140,16 +140,21 @@ impl OpenAIProvider {
         })
     }
 
-    fn body(&self, input: &[Value]) -> Value {
-        let tool = json!({
-            "type": "function", "name": "get_current_time",
-            "description": "Read the current UTC time. This does not change anything.",
-            "strict": true, "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false }
-        });
+    fn body(&self, input: &[Value], definitions: &[ToolDefinition]) -> Value {
+        let functions: Vec<_> = definitions
+            .iter()
+            .map(|definition| {
+                json!({
+                    "type": "function", "name": definition.name,
+                    "description": definition.description,
+                    "strict": definition.strict, "parameters": definition.parameters,
+                })
+            })
+            .collect();
         let tools = match self.config.auth_mode {
-            AuthMode::ApiKey => vec![tool],
+            AuthMode::ApiKey => functions,
             AuthMode::ChatGptPlan => vec![json!({
-                "type": "namespace", "name": "by_human", "description": "Read-only by-human tools", "tools": [tool]
+                "type": "namespace", "name": "by_human", "description": "Configured by-human tools", "tools": functions
             })],
         };
         let mut body = json!({
@@ -166,6 +171,7 @@ impl OpenAIProvider {
     async fn request(
         &self,
         input: &[Value],
+        tools: &[ToolDefinition],
         sink: &dyn RuntimeSink,
         cancel: &CancellationToken,
     ) -> Result<ModelTurn> {
@@ -173,7 +179,7 @@ impl OpenAIProvider {
         let response = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(EngineError::cancelled()),
-            result = self.client.post(self.endpoint.clone()).bearer_auth(&self.config.api_key).json(&self.body(input)).send() =>
+            result = self.client.post(self.endpoint.clone()).bearer_auth(&self.config.api_key).json(&self.body(input, tools)).send() =>
                 result.map_err(|_| EngineError::new(EngineErrorKind::Provider, "provider request failed"))?,
         };
         if !response.status().is_success() {
@@ -301,9 +307,10 @@ impl Model for OpenAIProvider {
     async fn turn(
         &self,
         input: &[Value],
+        tools: &[ToolDefinition],
         sink: &dyn RuntimeSink,
         cancel: &CancellationToken,
     ) -> Result<ModelTurn> {
-        self.request(input, sink, cancel).await
+        self.request(input, tools, sink, cancel).await
     }
 }

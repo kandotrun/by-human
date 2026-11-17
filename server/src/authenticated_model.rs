@@ -7,7 +7,7 @@ use crate::{
     auth::AuthManager,
     engine::{
         AuthMode, EngineError, EngineErrorKind, Model, ModelTurn, OpenAIProvider, ProviderConfig,
-        RuntimeSink,
+        RuntimeSink, ToolDefinition,
     },
 };
 
@@ -34,6 +34,7 @@ impl Model for ChatGptModel {
     async fn turn(
         &self,
         input: &[Value],
+        tools: &[ToolDefinition],
         sink: &dyn RuntimeSink,
         cancel: &CancellationToken,
     ) -> crate::engine::Result<ModelTurn> {
@@ -50,7 +51,7 @@ impl Model for ChatGptModel {
         };
         self.provider
             .with_access_token(token.as_str())?
-            .turn(input, sink, cancel)
+            .turn(input, tools, sink, cancel)
             .await
     }
 }
