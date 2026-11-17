@@ -20,12 +20,17 @@ required-features = ["postgres-tests"]
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
+getrandom = "0.4"
+libc = "0.2"
+jsonwebtoken = { version = "12", default-features = false, features = ["aws_lc_rs"] }
+sha2 = "0.10"
 async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "form"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
@@ -35,3 +40,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+aws-lc-rs = "1"

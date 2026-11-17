@@ -60,4 +60,5 @@ Sources: [Responses tool flow](https://developers.openai.com/api/docs/guides/fun
 Development and contract tests use an isolated PostgreSQL instance and synthetic
 model streams. Public deployment, existing OpenClaw data migration, private Every
 access and production cutover are separate actions. Runtime secrets are supplied
-through the environment and never committed or written to the execution log.
+through the environment or the dedicated protected OAuth store, and never
+committed or written to the execution log.

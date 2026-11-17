@@ -1,11 +1,14 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
+
+use crate::engine::AuthMode;
 
 /// Secrets deliberately have no Debug implementation.
 pub struct Config {
     pub database_url: String,
     pub listen: SocketAddr,
     pub api_token: String,
-    pub openai_api_key: String,
+    pub openai_auth: AuthMode,
+    pub openai_api_key: Option<String>,
     pub model: String,
 }
 
@@ -17,6 +20,7 @@ impl Config {
             "BY_HUMAN_API_TOKEN",
             "OPENAI_API_KEY",
             "OPENAI_MODEL",
+            "BY_HUMAN_OPENAI_AUTH",
         ]
         .into_iter()
         .filter_map(|name| {
@@ -43,11 +47,21 @@ impl Config {
                 && api_token.bytes().all(|byte| byte.is_ascii_graphic()),
             "BY_HUMAN_API_TOKEN must contain 32 to 512 non-whitespace ASCII bytes"
         );
-        let openai_api_key = required("OPENAI_API_KEY")?;
-        anyhow::ensure!(
-            api_token != openai_api_key,
-            "server authentication and OpenAI credentials must be different"
-        );
+        let openai_auth = match values.get("BY_HUMAN_OPENAI_AUTH").map(String::as_str) {
+            None | Some("chatgpt") => AuthMode::ChatGptPlan,
+            Some("api-key") => AuthMode::ApiKey,
+            Some(_) => anyhow::bail!("BY_HUMAN_OPENAI_AUTH must be chatgpt or api-key"),
+        };
+        let openai_api_key = if openai_auth == AuthMode::ApiKey {
+            let key = required("OPENAI_API_KEY")?;
+            anyhow::ensure!(
+                api_token != key,
+                "server authentication and OpenAI credentials must be different"
+            );
+            Some(key)
+        } else {
+            None
+        };
         let listen = values
             .get("BY_HUMAN_LISTEN")
             .map(String::as_str)
@@ -66,9 +80,21 @@ impl Config {
             database_url,
             listen,
             api_token,
+            openai_auth,
             openai_api_key,
             model,
         })
+    }
+
+    pub fn auth_directory() -> anyhow::Result<PathBuf> {
+        if let Some(path) = std::env::var_os("BY_HUMAN_AUTH_DIR") {
+            anyhow::ensure!(!path.is_empty(), "BY_HUMAN_AUTH_DIR must not be empty");
+            return Ok(path.into());
+        }
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("HOME or BY_HUMAN_AUTH_DIR is required"))?;
+        Ok(PathBuf::from(home).join(".config/by-human"))
     }
 }
 
@@ -92,6 +118,9 @@ mod tests {
         let mut input = values();
         let config = Config::from_values(&input).unwrap();
         assert!(config.listen.ip().is_loopback());
+        assert_eq!(config.openai_auth, AuthMode::ChatGptPlan);
+        assert!(config.openai_api_key.is_none());
+        input.insert("BY_HUMAN_OPENAI_AUTH".into(), "api-key".into());
         input.insert("BY_HUMAN_API_TOKEN".into(), "x".repeat(32));
         input.insert("OPENAI_API_KEY".into(), "x".repeat(32));
         assert!(Config::from_values(&input).is_err());
@@ -119,5 +148,16 @@ mod tests {
             input.insert("BY_HUMAN_API_TOKEN".into(), invalid);
             assert!(Config::from_values(&input).is_err());
         }
+    }
+
+    #[test]
+    fn chatgpt_login_never_requires_or_silently_uses_an_api_key() {
+        let mut input = values();
+        input.remove("OPENAI_API_KEY");
+        assert!(Config::from_values(&input).is_ok());
+        input.insert("BY_HUMAN_OPENAI_AUTH".into(), "api-key".into());
+        assert!(Config::from_values(&input).is_err());
+        input.insert("BY_HUMAN_OPENAI_AUTH".into(), "unknown".into());
+        assert!(Config::from_values(&input).is_err());
     }
 }
