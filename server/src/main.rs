@@ -2,8 +2,10 @@ use std::{sync::Arc, time::Duration};
 
 use by_human::{
     api::{self, ApiState},
+    auth::AuthManager,
+    authenticated_model::ChatGptModel,
     config::Config,
-    engine::{Engine, Limits, OpenAIProvider, ProviderConfig},
+    engine::{AuthMode, Engine, Limits, Model, OpenAIProvider, ProviderConfig},
     runner::Runner,
     store::Store,
 };
@@ -11,8 +13,20 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let command = std::env::args().nth(1);
-    match command.as_deref() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("login")
+            if args.len() == 1
+                || args.as_slice() == ["login", "--new-registration"]
+                || args.as_slice() == ["login", "--enable-plan"] =>
+        {
+            outcome(login(args.get(1).map(String::as_str)).await)
+        }
+        Some("auth-status") if args.len() == 1 => outcome(auth_status().await),
+        Some("serve" | "check") if args.len() != 1 => {
+            eprintln!("by-human: unexpected arguments; use --help");
+            std::process::ExitCode::FAILURE
+        }
         Some("serve") => match serve().await {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
@@ -38,7 +52,7 @@ async fn main() -> std::process::ExitCode {
         }
         None | Some("--help" | "-h") => {
             println!(
-                "Usage: by-human <check|serve>\n\ncheck  Apply PostgreSQL migrations and check readiness.\nserve  Start the authenticated HTTP API and single-owner runner."
+                "Usage: by-human <login|auth-status|check|serve>\n\nlogin [--enable-plan|--new-registration]  Sign in or explicitly request plan consent.\nauth-status  Show safe OpenAI login readiness.\ncheck        Apply PostgreSQL migrations and check readiness.\nserve        Start the authenticated HTTP API and single-owner runner."
             );
             std::process::ExitCode::SUCCESS
         }
@@ -49,16 +63,94 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
+fn outcome(result: anyhow::Result<()>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("by-human: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn login(option: Option<&str>) -> anyhow::Result<()> {
+    let auth = AuthManager::new(Config::auth_directory()?)?;
+    let pending = if option == Some("--enable-plan") {
+        auth.begin_plan_consent().await?
+    } else {
+        auth.begin_login(option == Some("--new-registration"))
+            .await?
+    };
+    println!(
+        "Open this official OpenAI URL in a browser on this computer:\n{}",
+        pending.authorization_url()
+    );
+    let cancel = CancellationToken::new();
+    let interrupt = cancel.clone();
+    let signal = tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        interrupt.cancel();
+    });
+    let result = pending.complete(&cancel).await;
+    signal.abort();
+    let status = result?;
+    anyhow::ensure!(
+        status.plan_enabled,
+        "ChatGPT sign-in is saved; enable plan access with by-human login --enable-plan"
+    );
+    println!("by-human: ChatGPT login is ready");
+    Ok(())
+}
+
+async fn auth_status() -> anyhow::Result<()> {
+    let auth = AuthManager::new(Config::auth_directory()?)?;
+    let status = auth.status().await?;
+    println!(
+        "by-human: registration_saved={}, authenticated={}, plan_enabled={}, expires_at={}",
+        status.registration_saved,
+        status.authenticated,
+        status.plan_enabled,
+        status
+            .expires_at
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".into())
+    );
+    Ok(())
+}
+
 async fn serve() -> anyhow::Result<()> {
     let config = Config::from_env()?;
+    let mut auth_manager = None;
+    let model: Arc<dyn Model> = match config.openai_auth {
+        AuthMode::ChatGptPlan => {
+            let auth = AuthManager::new(Config::auth_directory()?)?;
+            let status = auth.status().await?;
+            anyhow::ensure!(status.authenticated, "run by-human login first");
+            anyhow::ensure!(
+                status.plan_enabled,
+                "enable ChatGPT plan access with by-human login --enable-plan"
+            );
+            let model = ChatGptModel::new(auth.clone(), config.model)?;
+            auth_manager = Some(auth);
+            Arc::new(model)
+        }
+        AuthMode::ApiKey => Arc::new(OpenAIProvider::new(ProviderConfig::new(
+            config.model,
+            config
+                .openai_api_key
+                .expect("validated explicit API-key mode"),
+        ))?),
+    };
     let store = Store::connect(&config.database_url)
         .await
         .map_err(|_| anyhow::anyhow!("PostgreSQL could not be initialized"))?;
-    let provider = OpenAIProvider::new(ProviderConfig::new(config.model, config.openai_api_key))?;
-    let engine = Arc::new(Engine::new(Arc::new(provider), Limits::default()));
+    let engine = Arc::new(Engine::new(model, Limits::default()));
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .map_err(|_| anyhow::anyhow!("HTTP listener could not be bound"))?;
+    let listening_at = listener
+        .local_addr()
+        .map_err(|_| anyhow::anyhow!("HTTP listener address is unavailable"))?;
     let shutdown = CancellationToken::new();
     let runner = Runner::start(store.clone(), engine, shutdown.clone()).await?;
     let fatal = runner.fatal_token();
@@ -70,7 +162,7 @@ async fn serve() -> anyhow::Result<()> {
             .with_graceful_shutdown(http_shutdown.cancelled_owned())
             .await
     });
-    println!("by-human: HTTP API is ready at {}", config.listen);
+    println!("by-human: HTTP API is ready at {listening_at}");
     let mut http_finished = false;
     let mut failed = tokio::select! {
         result = shutdown_signal() => result.is_err(),
@@ -91,6 +183,13 @@ async fn serve() -> anyhow::Result<()> {
                 http.abort();
                 let _ = http.await;
             }
+        }
+    }
+    if let Some(auth) = auth_manager {
+        // Finish any already accepted refresh rotation even if Stop cancelled
+        // its model caller. The auth transport bounds this settlement.
+        if auth.settle_refreshes().await.is_err() {
+            failed = true;
         }
     }
     anyhow::ensure!(!failed, "server stopped because runtime readiness was lost");

@@ -9,13 +9,18 @@ is a reference; running Pi, OpenClaw or Mukumo is not required.
 
 ## Current delivery
 
-The first layer provides PostgreSQL conversation/run storage, idempotent
-submission, cancellation state, durable tool receipts and explicit recovery of
-interrupted work. It does not yet expose a chat API or perform live model calls.
-See [architecture](docs/architecture.md) for the following delivery steps.
+The Rust server now provides its own ChatGPT-plan login, PostgreSQL conversation
+and run storage, an authenticated HTTP API, streamed text, a bounded model/tool
+loop, Stop, durable event replay and conservative restart recovery. The initial
+tool only reads the current UTC time. This is an initial backend, not feature
+parity with OpenClaw or a measured performance claim.
 
-最初の層は、会話・実行状態の保存、送信の重複防止、停止状態、ツールの実行記録、
-中断した実行の復旧を提供します。チャットAPIとモデル呼び出しは次の変更で追加します。
+ChatGPTプランでの独自ログイン、会話・実行状態の保存、HTTP API、テキスト配信、
+停止、イベント再取得、再起動後の復旧を実装しています。初期ツールは時刻取得だけです。
+OpenClawの全面置換や性能改善の実証は、今後の接続・運用検証として扱います。
+
+See [architecture](docs/architecture.md), [login](docs/openai-login.md) and
+[HTTP API](docs/http-api.md) for the current behavior and limits.
 
 ## Development
 
@@ -24,6 +29,8 @@ Requirements: Rust 1.96+ and an isolated PostgreSQL 17+ database.
 ```sh
 export DATABASE_URL='postgres://byhuman:local-test-only@127.0.0.1:5432/byhuman'
 cargo run -p by-human -- check
+cargo run -p by-human -- login
+cargo run -p by-human -- auth-status
 ```
 
 Use a database created for by-human; `check` applies its migrations. The password
@@ -32,6 +39,23 @@ not in Git. `.env.example` is a template, not an automatically loaded config fil
 
 by-human専用のDBを用意してください。`check`はマイグレーションを適用します。
 上記のパスワードはローカル試験用です。秘密値は環境変数で渡し、Gitに保存しません。
+
+Sign in with your ChatGPT plan in a browser on the same computer. Then supply a
+separate random server token (32–512 ASCII bytes) as `BY_HUMAN_API_TOKEN` and run:
+
+```sh
+cargo run -p by-human -- serve
+```
+
+The default API address is `127.0.0.1:4310`; all `/v1` routes require the server
+Bearer token. `OPENAI_API_KEY` is not required and is not silently used. API-key
+billing is an explicit opt-in with `BY_HUMAN_OPENAI_AUTH=api-key`.
+ChatGPT credentials are stored in the dedicated owner-only `~/.config/by-human`
+directory; they are never read from another application.
+
+同じPCのブラウザでログインした後、OpenAI認証とは別のサーバー用トークンを
+`BY_HUMAN_API_TOKEN`で渡し、`serve`を実行します。APIキーへの自動切替はありません。
+認証情報は専用の`~/.config/by-human`へ保存します。
 
 ```sh
 cargo fmt --all --check
