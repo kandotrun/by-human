@@ -106,6 +106,11 @@ test('code paths, fences in lists, URLs in emphasis and table escapes', async ({
   expect(await html(page, 'https://example.comです https://example.com/パス')).toBe(
     `<p>${link('https://example.com', 'https://example.com')}です ${link('https://example.com/パス', 'https://example.com/パス')}</p>`);
   expect(await html(page, '| `a\\|b` |\n|---|')).toBe('<div class="table-scroll"><table><thead><tr><th><code>a|b</code></th></tr></thead></table></div>');
+  expect(await html(page, '- item\n  | column |\n  | --- |\nOutside')).toBe(
+    '<ul><li>item<div class="table-scroll"><table><thead><tr><th>column</th></tr></thead></table></div></li></ul><p>Outside</p>');
+  expect(await html(page, '- a\n  - b\n    ```\n    code\nOutside')).toBe('<ul><li>a<ul><li>b' + code('', 'code') + '</li></ul></li></ul><p>Outside</p>');
+  expect(await html(page, '_https://example.com/my_page_')).toBe(`<p><em>${link('https://example.com/my_page', 'https://example.com/my_page')}</em></p>`);
+  expect(await html(page, '[broken](oops[Email](mailto:team@example.com)')).toBe(`<p>[broken](oops${link('mailto:team@example.com', 'Email')}</p>`);
 });
 
 test('hostile input never creates active content', async ({ page }) => {
@@ -183,6 +188,11 @@ test('pathological replies render quickly', async ({ page }) => {
       headingSpaces: '# a' + ' '.repeat(200_000) + 'b',
       mixedDelimiters: '_a '.repeat(60_000) + '*b*'.repeat(60_000),
       deepEmphasis: '*a '.repeat(70) + 'x '.repeat(300_000) + ' a*'.repeat(70),
+      wideHeader: '|' + 'a|'.repeat(10_001) + '\n|' + '-|'.repeat(10_001),
+      sameDelimiter: '*a '.repeat(40_000) + 'a**b '.repeat(40_000),
+      longRuns: '*'.repeat(400_000) + 'x' + '*'.repeat(400_000),
+      angleLinks: '[a](<'.repeat(30_000),
+      badAuthorities: 'http://[/.'.repeat(30_000),
     };
     return Object.fromEntries(Object.entries(inputs).map(([name, text]) => {
       const started = performance.now();

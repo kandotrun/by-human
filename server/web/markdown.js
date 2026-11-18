@@ -198,7 +198,7 @@ function parseBlocks(lines, depth) {
     }
     const align = line.includes("|") && index + 1 < lines.length ? delimiterRow(lines[index + 1]) : null;
     const head = align ? splitRow(line) : null;
-    if (head && head.length === align.length) {
+    if (head && head.length === align.length && head.length <= MAX_TABLE_CELLS) {
       flush();
       const rows = [];
       let next = index + 2;
@@ -231,21 +231,25 @@ function parseList(lines, start, first, depth) {
     const body = [];
     let fenceOpen = "";
     let paragraphOpen = false;
+    // Fences are tracked at any indentation, so a fence in a nested item also
+    // stops lazy continuation of this one.
     const add = (content) => {
       body.push(content);
+      const trimmed = trimLine(content);
+      const marker = /^(`{3,}|~{3,})/.exec(trimmed);
       if (fenceOpen) {
-        const close = FENCE_CLOSE.exec(content);
-        if (close && close[1][0] === fenceOpen[0] && close[1].length >= fenceOpen.length) fenceOpen = "";
+        if (marker && marker[1][0] === fenceOpen[0] && marker[1].length >= fenceOpen.length && trimmed.length === marker[1].length) fenceOpen = "";
         paragraphOpen = false;
         return;
       }
-      const fence = FENCE.exec(content);
-      if (fence && !(fence[2][0] === "`" && fence[3].includes("`"))) {
-        fenceOpen = fence[2];
+      if (marker && !(marker[1][0] === "`" && trimmed.slice(marker[1].length).includes("`"))) {
+        fenceOpen = marker[1];
         paragraphOpen = false;
         return;
       }
-      paragraphOpen = !isBlank(content) && !HEADING.test(content) && !isThematicBreak(content);
+      // Only plain paragraph text may absorb an outdented line; a table row or
+      // another block would swallow it.
+      paragraphOpen = trimmed !== "" && !HEADING.test(trimmed) && !isThematicBreak(trimmed) && !trimmed.includes("|") && !QUOTE.test(trimmed);
     };
     add(item.rest);
     let next = index + 1;
@@ -445,19 +449,19 @@ function matchBrackets(text, spans) {
   return matches;
 }
 
-// The next whitespace or ")" for every position, computed once per text, so
-// each link destination is rejected in constant time when it is too long.
-function terminators(text, scan) {
-  if (!scan.terminators) {
+// For every position, the next character that can end a link destination,
+// computed once per text, so each candidate is rejected in constant time.
+function nextStops(text, scan, key, stops) {
+  if (!scan[key]) {
     const next = new Int32Array(text.length + 1);
     next[text.length] = text.length;
-    for (let index = text.length - 1; index >= 0; index -= 1) {
-      next[index] = text[index] === ")" || WHITESPACE.test(text[index]) ? index : next[index + 1];
-    }
-    scan.terminators = next;
+    for (let index = text.length - 1; index >= 0; index -= 1) next[index] = stops(text[index]) ? index : next[index + 1];
+    scan[key] = next;
   }
-  return scan.terminators;
+  return scan[key];
 }
+const terminators = (text, scan) => nextStops(text, scan, "terminators", (char) => char === ")" || WHITESPACE.test(char));
+const angleStops = (text, scan) => nextStops(text, scan, "angles", (char) => char === ">" || char === "\n");
 
 // A failed scan that reached the end of the text without a terminator proves
 // that every later candidate fails too, so the cache keeps link parsing linear.
@@ -468,15 +472,15 @@ function linkTail(text, at, scan) {
   skipSpaces();
   let href = "";
   if (text[index] === "<") {
-    const end = text.indexOf(">", index);
-    const newline = text.indexOf("\n", index);
-    if (end < 0 || (newline >= 0 && newline < end)) return null;
+    const end = angleStops(text, scan)[index + 1];
+    if (text[end] !== ">" || end - index > MAX_DESTINATION) return null;
     href = text.slice(index + 1, end);
     index = end + 1;
   } else {
     const start = index;
     if (terminators(text, scan)[start] - start > MAX_DESTINATION) return null;
     let depth = 0;
+    let closed = false;
     for (; index < text.length; index += 1) {
       if (index - start > MAX_DESTINATION) return null;
       const char = text[index];
@@ -485,10 +489,11 @@ function linkTail(text, at, scan) {
       else if (char === ")") {
         if (depth === 0) break;
         depth -= 1;
+        closed = true;
       } else if (WHITESPACE.test(char)) break;
     }
     if (index >= text.length) {
-      scan.deadEnd = Math.min(scan.deadEnd, at);
+      if (!closed) scan.deadEnd = Math.min(scan.deadEnd, at);
       return null;
     }
     if (depth !== 0) return null;
@@ -517,13 +522,17 @@ function bareUrlEnd(text, start) {
   if (!head.startsWith("http://") && !head.startsWith("https://")) return 0;
   // A URL wrapped in emphasis (**https://...**) ends at the closing delimiter.
   const wrapper = "*_~".includes(text[start - 1] ?? "") ? text[start - 1] : "";
+  // Underscores are common in paths, so only one that can close ends the URL.
+  const closesWrapper = (at) => text[at] === wrapper && (wrapper !== "_" || !WORD.test(text[at + 1] ?? " "));
   let end = start + head.indexOf("//") + 2;
   // The host is ASCII, so Japanese text or markup right after it is not part of it.
   while (end < text.length && AUTHORITY.test(text[end])) end += 1;
+  // An invalid host is rejected before its path is read, so repeats stay linear.
+  if (!safeHref(text.slice(start, end))) return 0;
   let opens = 0;
   let closes = 0;
   if ("/?#".includes(text[end] ?? " ")) {
-    while (end < text.length && !URL_STOP.has(text[end]) && !WHITESPACE.test(text[end]) && text[end] !== wrapper) {
+    while (end < text.length && !URL_STOP.has(text[end]) && !WHITESPACE.test(text[end]) && !closesWrapper(end)) {
       if (text[end] === "(") opens += 1;
       else if (text[end] === ")") closes += 1;
       end += 1;
@@ -648,14 +657,18 @@ function tokenize(text, allowLinks) {
 // always nest, so the tree is built afterwards in a single pass.
 function matchEmphasis(tokens) {
   const stacks = { "*": [], _: [], "~": [] };
-  const bottom = { "*": 0, _: 0, "~": 0 };
+  // After a closer finds nothing, later closers of the same delimiter, length
+  // class and openness skip the openers it already rejected (CommonMark's
+  // openers_bottom), so mismatched runs are never rescanned.
+  const bottom = new Map();
   tokens.forEach((token, position) => {
     if (token.type !== "delim") return;
     const stack = stacks[token.char];
+    const key = `${token.char}${token.canOpen ? 1 : 0}${token.count % 3}`;
     if (token.canClose) {
       while (token.remaining > 0) {
         let found = -1;
-        for (let index = stack.length - 1; index >= Math.min(bottom[token.char], stack.length); index -= 1) {
+        for (let index = stack.length - 1; index >= Math.min(bottom.get(key) ?? 0, stack.length); index -= 1) {
           const opener = tokens[stack[index]];
           if (token.char === "~" && (opener.remaining !== 2 || token.remaining !== 2)) continue;
           const sum = opener.count + token.count;
@@ -663,14 +676,17 @@ function matchEmphasis(tokens) {
           found = index;
           break;
         }
-        if (found < 0) break;
+        if (found < 0) {
+          bottom.set(key, stack.length);
+          break;
+        }
         const openerPosition = stack[found];
         const opener = tokens[openerPosition];
         const use = token.char === "~" ? 2 : opener.remaining >= 2 && token.remaining >= 2 ? 2 : 1;
         const kind = token.char === "~" ? "del" : use === 2 ? "strong" : "em";
         opener.remaining -= use;
         token.remaining -= use;
-        opener.opens.unshift(kind);
+        opener.opens.push(kind);
         token.closes.push(kind);
         stack.length = opener.remaining > 0 ? found + 1 : found;
         // Delimiters inside a matched pair can no longer open, whatever their kind.
@@ -678,7 +694,6 @@ function matchEmphasis(tokens) {
           while (other.length && other[other.length - 1] > openerPosition) other.pop();
         }
       }
-      if (token.remaining > 0 && !token.canOpen) bottom[token.char] = stack.length;
     }
     if (token.canOpen && token.remaining > 0) stack.push(position);
   });
@@ -699,7 +714,9 @@ function parseInline(text, allowLinks) {
       if (!frame.flat) stack[stack.length - 1].children.push({ type: kind, children: frame.children });
     }
     if (token.remaining) stack[stack.length - 1].children.push({ type: "text", value: token.char.repeat(token.remaining) });
-    for (const kind of token.opens) {
+    // Later matches are outer, so opening kinds are used from the last.
+    for (let index = token.opens.length - 1; index >= 0; index -= 1) {
+      const kind = token.opens[index];
       const parent = stack[stack.length - 1];
       // Past the limit, emphasis is dropped and children go straight to the
       // deepest kept frame, so nothing is copied or spread later.

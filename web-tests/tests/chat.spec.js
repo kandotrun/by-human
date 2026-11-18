@@ -927,6 +927,8 @@ test('the first streamed text updates only the reply in progress', async ({ page
     await route.continue();
   });
   const sent = await send(page, '停止テスト');
+  // The accepted run renders before the stream starts; capture after that.
+  await expect(page.locator(`#chat-log [data-role="user"][data-run-id="${sent.id}"]`)).toBeVisible();
   const earlier = await userRows(page).first().elementHandle();
   releaseEvents();
   await expect(assistantRows(page).last()).toHaveText('停止操作を待っています。');
