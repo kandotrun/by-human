@@ -18,8 +18,8 @@
       <button class="new-conversation" id="new-chat" type="button" disabled><span aria-hidden="true">＋</span>新しい会話</button>
       <nav id="conversation-list" class="conversation-list" aria-label="会話一覧"></nav>
       <div class="sidebar-footer">
-        <span class="connection-state" id="connection-state">未接続</span>
-        <button class="text-button" id="disconnect" type="button" disabled>切断</button>
+        <span class="connection-state" id="connection-state">未ログイン</span>
+        <button class="text-button" id="disconnect" type="button" disabled>ログアウト</button>
       </div>
     </aside>
     <button class="drawer-backdrop" id="drawer-backdrop" type="button" aria-label="会話一覧を閉じる" hidden></button>
@@ -53,13 +53,13 @@
 
   <dialog id="connect-dialog" aria-labelledby="connect-title">
     <form id="connect-form" class="dialog-content">
-      <h2 id="connect-title">by-human に接続</h2>
-      <p>このサーバーのトークンを入力してください。</p>
+      <h2 id="connect-title">by-human にログイン</h2>
+      <p>サーバートークンを入力してください。このブラウザでは、使うたびに30日間ログインが続きます。</p>
       <label for="server-token">サーバートークン</label>
       <input id="server-token" type="password" name="token" autocomplete="off" spellcheck="false" required minlength="32" maxlength="512">
-      <p class="field-note">トークンは保存しません。ページを開き直したときは再入力が必要です。</p>
+      <p class="field-note">トークン自体はブラウザに保存しません。ログイン状態は、ページのスクリプトから読めない Cookie で保持します。</p>
       <p class="form-error" id="connect-error" role="alert"></p>
-      <button class="primary-button" id="connect-submit" type="submit">接続</button>
+      <button class="primary-button" id="connect-submit" type="submit">ログイン</button>
     </form>
   </dialog>
 
@@ -82,7 +82,7 @@
     <div class="dialog-content">
       <h2 id="storage-title">このタブの保存について</h2>
       <p>下書きと送信待ちのメッセージは、このブラウザのタブ内に保存します。ページを開き直しても、同じメッセージを重複して送らずに確認できます。</p>
-      <p>サーバートークンと受信した会話履歴はブラウザに保存しません。共有の端末では、利用後にタブを閉じてください。</p>
+      <p>サーバートークンと受信した会話履歴はブラウザに保存しません。ログイン状態はスクリプトから読めない Cookie で保持します。共有の端末では、利用後にログアウトしてください。</p>
       <button id="close-storage" class="primary-button" type="button">閉じる</button>
     </div>
   </dialog>

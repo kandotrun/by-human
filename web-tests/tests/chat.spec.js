@@ -8,13 +8,19 @@ const assistantRows = page => page.locator('#chat-log [data-role="assistant"]');
 const newChat = page => page.locator('#new-chat');
 const conversationButton = (page, id) => page.locator(`#conversation-list [data-conversation-id="${id}"]`);
 const conversationTitle = page => page.locator('#conversation-title');
+const signInDialog = page => page.getByRole('dialog', { name: 'by-human にログイン', exact: true });
 
 async function connect(page, navigate = true) {
   if (navigate) await page.goto('/');
-  const dialog = page.getByRole('dialog', { name: 'by-human に接続', exact: true });
+  const dialog = signInDialog(page);
   await dialog.getByLabel('サーバートークン', { exact: true }).fill(TOKEN);
-  await dialog.getByRole('button', { name: '接続', exact: true }).click();
+  await dialog.getByRole('button', { name: 'ログイン', exact: true }).click();
   await expect(dialog).toBeHidden();
+}
+
+async function expectSignedIn(page) {
+  await expect(signInDialog(page)).toBeHidden();
+  await expect(page.locator('#connection-state')).toHaveText('ログイン中');
 }
 
 async function newConversation(page) {
@@ -99,7 +105,7 @@ test('a new conversation takes its title from the first message and keeps it aft
   await expect(conversationButton(page, id)).toHaveText(title);
 
   await page.reload();
-  await connect(page, false);
+  await expectSignedIn(page);
   await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
   await expect(conversationTitle(page)).toHaveText(title);
   await expect(conversationButton(page, id)).toHaveText(title);
@@ -240,7 +246,7 @@ test('conversation creation is available after reconnecting from a rejected toke
     return route.continue();
   });
   await newChat(page).click();
-  await expect(page.getByRole('dialog', { name: 'by-human に接続', exact: true })).toBeVisible();
+  await expect(signInDialog(page)).toBeVisible();
   await connect(page, false);
   await newConversation(page);
 });
@@ -310,7 +316,7 @@ test('lost send acknowledgment survives reload and reuses the original identity'
   await expect(page.getByRole('button', { name: '送信結果を確認', exact: true })).toBeVisible();
   await composer(page).fill('確認中に書いた次の下書き');
   await page.reload();
-  await connect(page, false);
+  await expectSignedIn(page);
   await expect(composer(page)).toHaveValue('確認中に書いた次の下書き');
   // Exact-key history is already proof of acceptance after reload.
   await expect(page.getByRole('button', { name: '送信結果を確認', exact: true })).toBeHidden();
@@ -723,4 +729,37 @@ test('an offscreen title refresh finds a conversation outside the newest list wi
     await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
     await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
   }
+});
+
+test('sign-in survives reload and sign-out returns to the dialog', async ({ page, context }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  await page.reload();
+  await expectSignedIn(page);
+  await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
+  const session = (await context.cookies()).find(cookie => cookie.name === 'by_human_session');
+  expect(session).toMatchObject({ httpOnly: true, sameSite: 'Strict', path: '/' });
+  expect(session.value).not.toContain(TOKEN);
+  expect(await page.evaluate(() => document.cookie)).not.toContain('by_human_session');
+  await page.getByRole('button', { name: 'ログアウト', exact: true }).click();
+  await expect(signInDialog(page)).toBeVisible();
+  await page.reload();
+  await expect(signInDialog(page)).toBeVisible();
+  expect((await context.cookies()).some(cookie => cookie.name === 'by_human_session')).toBeFalsy();
+});
+
+test('an unknown session cookie asks to sign in again', async ({ page, context }) => {
+  await context.addCookies([{ name: 'by_human_session', value: 'A'.repeat(43), url: 'http://127.0.0.1:43219' }]);
+  await page.goto('/');
+  await expect(signInDialog(page)).toBeVisible();
+  await connect(page, false);
+  await expectSignedIn(page);
+});
+
+test('browser sessions reject writes from another origin', async ({ page }) => {
+  await connect(page);
+  const denied = await page.request.post('/v1/conversations', { data: {}, headers: { Origin: 'http://evil.example' } });
+  expect(denied.status()).toBe(403);
+  const allowed = await page.request.post('/v1/conversations', { data: {}, headers: { Origin: 'http://127.0.0.1:43219' } });
+  expect(allowed.status()).toBe(201);
 });
