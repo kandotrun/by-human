@@ -1957,6 +1957,16 @@ test('a late search answer cannot bring back a conversation deleted elsewhere', 
 
 test.describe('on a phone', () => {
   test.use({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true });
+  // iOS keeps the layout viewport and shrinks only the visual viewport.
+  const emulateKeyboard = page => page.addInitScript(() => {
+    const visual = new EventTarget();
+    let height = null;
+    for (const [name, read] of [['height', () => height ?? window.innerHeight], ['width', () => window.innerWidth], ['scale', () => 1], ['offsetTop', () => 0]]) {
+      Object.defineProperty(visual, name, { get: read });
+    }
+    Object.defineProperty(window, 'visualViewport', { get: () => visual, configurable: true });
+    window.showKeyboard = value => { height = value; visual.dispatchEvent(new Event('resize')); };
+  });
 
   test('Return adds a line and the send button sends', async ({ page }) => {
     await connect(page);
@@ -1989,16 +1999,7 @@ test.describe('on a phone', () => {
   });
 
   test('the layout fits the visible area above the keyboard', async ({ page }) => {
-    // iOS keeps the layout viewport and shrinks only the visual viewport.
-    await page.addInitScript(() => {
-      const visual = new EventTarget();
-      let height = null;
-      for (const [name, read] of [['height', () => height ?? window.innerHeight], ['width', () => window.innerWidth], ['scale', () => 1], ['offsetTop', () => 0]]) {
-        Object.defineProperty(visual, name, { get: read });
-      }
-      Object.defineProperty(window, 'visualViewport', { get: () => visual, configurable: true });
-      window.showKeyboard = value => { height = value; visual.dispatchEvent(new Event('resize')); };
-    });
+    await emulateKeyboard(page);
     await connect(page);
     const shellHeight = () => page.locator('.app-shell').evaluate(node => node.getBoundingClientRect().height);
     await expect.poll(shellHeight).toBe(852);
@@ -2014,5 +2015,15 @@ test.describe('on a phone', () => {
     await page.evaluate(() => window.showKeyboard(null));
     await expect.poll(shellHeight).toBe(852);
     await expect(page.locator('html')).not.toHaveClass(/keyboard-open/);
+  });
+
+  test('the drawer fits the visible area above the search keyboard', async ({ page }) => {
+    await emulateKeyboard(page);
+    await connect(page);
+    await page.locator('#open-sidebar').tap();
+    await page.locator('#conversation-query').tap();
+    await page.evaluate(() => window.showKeyboard(400));
+    // The list then scrolls within the visible area, not behind the keyboard.
+    await expect.poll(() => page.locator('#sidebar').evaluate(node => node.getBoundingClientRect().bottom)).toBe(400);
   });
 });
