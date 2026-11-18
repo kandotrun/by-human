@@ -1625,3 +1625,31 @@ test('a conversation deleted before its creation response arrives stays deleted'
     release();
   }
 });
+
+test('a conversation created before an accepted send is listed below it', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  const { promise: committed, resolve: reportCommitted } = Promise.withResolvers();
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const response = await route.fetch();
+    reportCommitted((await response.json()).id);
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
+    await newChat(page).click();
+    const created = await committed;
+    await send(page, '作成中に送信');
+    // The send's own response has moved its row, with its first-message title.
+    await expect(conversationButton(page, id)).toHaveText('作成中に送信');
+    release();
+    await expect(conversationButton(page, created)).toHaveAttribute('aria-current', 'page');
+    const rows = page.locator('#conversation-list [data-conversation-id]');
+    await expect(rows.nth(0)).toHaveAttribute('data-conversation-id', id);
+    await expect(rows.nth(1)).toHaveAttribute('data-conversation-id', created);
+  } finally {
+    release();
+  }
+});

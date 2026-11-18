@@ -432,10 +432,15 @@ function touchConversation(id, at) {
   if (index < 0 || typeof at !== "string" || Date.parse(conversations[index].last_activity_at) >= Date.parse(at)) return;
   const [conversation] = conversations.splice(index, 1);
   conversation.last_activity_at = at;
+  insertByActivity(conversation);
+  listGeneration += 1;
+}
+
+// Newest activity first, above rows with the same time.
+function insertByActivity(conversation) {
   const time = Date.parse(conversation.last_activity_at);
   const position = conversations.findIndex((item) => !(Date.parse(item.last_activity_at) > time));
   conversations.splice(position < 0 ? conversations.length : position, 0, conversation);
-  listGeneration += 1;
 }
 
 function runStatus(run) {
@@ -913,8 +918,9 @@ async function createConversation() {
     const result = await api("/conversations", { method: "POST", body: {} });
     if (captured.connection !== connection || !signedIn || forgotten.has(result.id)) return;
     listGeneration += 1;
-    // A list reload can already include it.
-    if (!conversations.some((item) => item.id === result.id)) conversations.unshift(result);
+    // A list reload can already include it, and a send accepted meanwhile is
+    // newer activity.
+    if (!conversations.some((item) => item.id === result.id)) insertByActivity(result);
     if (current(captured)) await selectConversation(result.id, true);
   } catch (error) {
     if (current(captured)) {
