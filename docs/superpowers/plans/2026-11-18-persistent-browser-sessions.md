@@ -97,6 +97,19 @@ mod tests {
     }
 
     #[test]
+    fn the_default_http_port_is_omitted_like_browsers_do() {
+        let origins = BrowserOrigins::loopback("127.0.0.1:80".parse::<SocketAddr>().unwrap());
+        let allows = |value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, HeaderValue::from_static(value));
+            origins.allows(&headers)
+        };
+        assert!(allows("http://127.0.0.1"));
+        assert!(allows("http://localhost"));
+        assert!(!allows("http://127.0.0.1:80"));
+    }
+
+    #[test]
     fn only_exact_loopback_origins_of_the_listener_are_allowed() {
         let origins = BrowserOrigins::loopback("127.0.0.1:4310".parse::<SocketAddr>().unwrap());
         let origin = |values: &[&str]| {
@@ -235,12 +248,20 @@ impl BrowserOrigins {
         if !addr.ip().is_loopback() {
             return Self::default();
         }
-        let port = addr.port();
-        let direct = match addr {
-            SocketAddr::V4(v4) => format!("http://{}:{port}", v4.ip()),
-            SocketAddr::V6(v6) => format!("http://[{}]:{port}", v6.ip()),
+        // Browsers omit the default port from an HTTP origin.
+        let port = match addr.port() {
+            80 => String::new(),
+            port => format!(":{port}"),
         };
-        Self(vec![direct, format!("http://localhost:{port}")])
+        let direct = match addr {
+            SocketAddr::V4(v4) => format!("http://{}{port}", v4.ip()),
+            SocketAddr::V6(v6) => format!("http://[{}]{port}", v6.ip()),
+        };
+        Self(vec![direct, format!("http://localhost{port}")])
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// True only for a single `Origin` header that exactly matches.
@@ -541,6 +562,10 @@ async fn authenticate(State(state): State<ApiState>, mut request: axum::extract:
         }
         Authenticated::Bearer
     } else {
+        // Without an allowed page origin, browser sessions are unavailable.
+        if state.browser_origins.is_empty() {
+            return Err(ApiError::unauthorized());
+        }
         let CookieSecret::Present(secret) = browser_session::read_cookie(request.headers()) else {
             return Err(ApiError::unauthorized());
         };
@@ -679,8 +704,8 @@ In the two reload tests replace `await connect(page, false);` after `page.reload
   - `api()` sends no `Authorization` header, uses `credentials: "same-origin"`, returns `null` for `204`, and on `401` calls `disconnect(SIGNED_OUT)` where `const SIGNED_OUT = "ログインの有効期限が切れたか、ログアウトしました。サーバートークンを入力してください。";`.
   - `friendlyError` maps `403` to `このアドレスからはログインできません。サーバーと同じアドレス（例: http://127.0.0.1:4310）で開いてください。`
   - The event stream fetch drops `Authorization`, uses `credentials: "same-origin"`, and handles `401` with `disconnect(SIGNED_OUT)`.
-  - Add `openSignedIn(capturedConnection)` (load conversations, close the dialog, select the remembered or newest conversation), `resumeSession()` (`GET /v1/session`; `401` opens the dialog; other failures show the error in the dialog) and `signOut()` (`DELETE /v1/session`, then `disconnect()`; other failures show a notice).
-  - `connect()` posts `{token}` to `/v1/sessions` with `fetch`, clears the field immediately, shows `サーバートークンが正しくありません。` for `401` and `friendlyError` otherwise, then calls `openSignedIn`.
+  - Add `openSignedIn(capturedConnection)` (load conversations, close the dialog, select the remembered or newest conversation), `resumeSession(afterSignIn)` (`GET /v1/session`; only a `401` calls `disconnect()` and returns to the dialog; transport and server failures, including a failed list load, close the dialog, keep the session and show a notice whose 再試行 calls `resumeSession()` again) and `signOut()` (`DELETE /v1/session`, then `disconnect()`; other failures show a notice).
+  - `connect()` posts `{token}` to `/v1/sessions` with `fetch`, clears the field immediately, shows `サーバートークンが正しくありません。` for `401` and `friendlyError` otherwise. After a successful exchange it keeps the button disabled and calls `resumeSession(true)`, so a failed first load keeps the new session and offers 再試行 instead of asking for the token.
   - The sidebar shows `ログイン中` / `未ログイン`; the footer button calls `signOut`.
   - Start-up: `restoreSession(); render(); if (secureOrigin()) resumeSession(); else $("connect-dialog").showModal();`
 
