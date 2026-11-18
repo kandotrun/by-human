@@ -23,10 +23,15 @@ streamed replies, Stop, event-stream reconnection and per-conversation drafts.
 Choose **新しい会話** to start writing immediately. The server saves a short
 title from the first accepted message and displays it in the conversation list.
 Tool activity appears as progress; tool arguments, results and reasoning do not
-appear as chat messages. Text is rendered literally, without HTML execution.
+appear as chat messages. Replies render a safe Markdown subset: headings, lists
+and task items, quotes, tables, inline and fenced code, and links limited to
+`http`, `https` and `mailto`. The renderer builds DOM nodes directly and never
+parses HTML, so HTML in a reply stays text, images appear as links and other
+link schemes as plain text. Each code block and reply has a copy button. Your
+own messages stay plain text.
 The browser loads the latest 100 runs that fit in an 8 MiB response. It marks
 omitted history at the top of the conversation. Older runs remain stored on the
-server. Paging and Markdown rendering remain outside this slice.
+server. Paging remains outside this slice.
 
 Drafts and unacknowledged submissions are kept in this tab's sessionStorage.
 These contain conversation text. They are scoped to this server origin and tab,
@@ -69,6 +74,9 @@ not an independent verification of external effects or a per-tool approval syste
 
 **新しい会話**を開くと、名前の入力なしですぐにメッセージを書けます。
 最初のメッセージが受け付けられると、その内容をもとにタイトルが付きます。
+
+返信は見出し・リスト・表・コードなどのMarkdownで表示し、コードと返信本文はコピーできます。
+返信内のHTMLは実行せずに文字として表示し、画像は読み込まずリンクとして表示します。
 
 下書きと送信結果の確認待ちは、このタブのsessionStorageに保存します。
 送信結果が不明なときは、同じ送信IDで確認し、新しいIDで送り直しません。
