@@ -48,7 +48,9 @@ Alternatives considered:
 | `DELETE /v1/session` | cookie | Revokes the current browser session and expires the cookie. `204`. |
 
 Cookie: `by_human_session=<43 base64url characters>; Path=/; HttpOnly;
-SameSite=Strict; Max-Age=2592000`. The value is 32 random bytes. `Secure` is
+SameSite=Strict; Max-Age=34560000`. The value is 32 random bytes. The cookie is only a
+handle kept for the 400 days browsers allow; the server ends the session after
+30 days without use (below). `Secure` is
 added when the allowed origin is `https` (track 4); loopback `http` origins
 cannot carry `Secure` in every browser.
 
