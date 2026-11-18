@@ -64,8 +64,9 @@ button { color: inherit; }
 .markdown ul, .markdown ol { padding-left: 1.4em; }
 .markdown li + li { margin-top: .2em; }
 .markdown li > ul, .markdown li > ol { margin: .2em 0 0; }
-.markdown .task-list { list-style: none; padding-left: .2em; }
+.markdown ul > .task-item { list-style: none; }
 .markdown .task-item input { margin: 0 .5em 0 0; vertical-align: -1px; accent-color: var(--accent); }
+.markdown ul > .task-item > input:first-child { margin-left: -1.3em; }
 .markdown blockquote { padding: .1em 0 .1em 1em; border-left: 3px solid var(--line); color: var(--muted); }
 .markdown hr { border: 0; border-top: 1px solid var(--line); margin: 1.4em 0; }
 .markdown a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }

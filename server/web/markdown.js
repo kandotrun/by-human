@@ -5,6 +5,9 @@
 
 const MAX_BLOCK_DEPTH = 16;
 const MAX_INLINE_DEPTH = 64;
+// Padding short rows to the header width must not amplify a small reply.
+const MAX_TABLE_CELLS = 10_000;
+const MAX_DESTINATION = 2_048;
 const ALLOWED_SCHEMES = new Set(["http", "https", "mailto"]);
 const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/;
 const ESCAPED = /\\([!-/:-@[-`{-~])/g;
@@ -31,7 +34,19 @@ export function renderMarkdown(source, doc = document) {
 // ---------------------------------------------------------------- blocks
 
 const isBlank = (line) => /^[ \t]*$/.test(line);
-const trimLine = (line) => line.replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
+const isSpace = (char) => char === " " || char === "\t";
+
+function trimEnd(line) {
+  let end = line.length;
+  while (end > 0 && isSpace(line[end - 1])) end -= 1;
+  return line.slice(0, end);
+}
+
+function trimLine(line) {
+  let start = 0;
+  while (start < line.length && isSpace(line[start])) start += 1;
+  return trimEnd(line.slice(start));
+}
 
 function indentOf(line) {
   let index = 0;
@@ -52,7 +67,7 @@ function isThematicBreak(line) {
 }
 
 function headingText(raw = "") {
-  let text = raw.replace(/[ \t]+$/, "");
+  let text = trimEnd(raw);
   let end = text.length;
   while (end > 0 && text[end - 1] === "#") end -= 1;
   // A closing sequence must be all hashes or follow a space.
@@ -97,7 +112,7 @@ function splitRow(line) {
     }
   }
   cells.push(trimLine(text.slice(start)));
-  return cells;
+  return cells.map((cell) => cell.replace(/\\\|/g, "|"));
 }
 
 function delimiterRow(line) {
@@ -187,9 +202,12 @@ function parseBlocks(lines, depth) {
       flush();
       const rows = [];
       let next = index + 2;
-      while (next < lines.length && !isBlank(lines[next]) && !startsBlock(lines[next], depth)) {
+      let total = head.length;
+      // Rows beyond the cell budget continue as ordinary text.
+      while (next < lines.length && !isBlank(lines[next]) && !startsBlock(lines[next], depth) && total + head.length <= MAX_TABLE_CELLS) {
         const cells = splitRow(lines[next]);
         rows.push(Array.from(head, (_, column) => cells[column] ?? ""));
+        total += head.length;
         next += 1;
       }
       blocks.push({ type: "table", align, head, rows });
@@ -210,23 +228,42 @@ function parseList(lines, start, first, depth) {
   while (index < lines.length) {
     const item = matchItem(lines[index]);
     if (!item || item.ordered !== first.ordered || item.marker !== first.marker || isThematicBreak(lines[index])) break;
-    const body = [item.rest];
+    const body = [];
+    let fenceOpen = "";
+    let paragraphOpen = false;
+    const add = (content) => {
+      body.push(content);
+      if (fenceOpen) {
+        const close = FENCE_CLOSE.exec(content);
+        if (close && close[1][0] === fenceOpen[0] && close[1].length >= fenceOpen.length) fenceOpen = "";
+        paragraphOpen = false;
+        return;
+      }
+      const fence = FENCE.exec(content);
+      if (fence && !(fence[2][0] === "`" && fence[3].includes("`"))) {
+        fenceOpen = fence[2];
+        paragraphOpen = false;
+        return;
+      }
+      paragraphOpen = !isBlank(content) && !HEADING.test(content) && !isThematicBreak(content);
+    };
+    add(item.rest);
     let next = index + 1;
     let blank = false;
     for (; next < lines.length; next += 1) {
       const line = lines[next];
       if (isBlank(line)) {
         blank = true;
-        body.push("");
+        add("");
         continue;
       }
       if (indentOf(line) >= item.contentIndent) {
-        body.push(line.slice(item.contentIndent));
+        add(line.slice(item.contentIndent));
         blank = false;
         continue;
       }
-      if (blank || startsBlock(line, depth + 1)) break;
-      body.push(line); // A lazy paragraph continuation.
+      if (blank || fenceOpen || !paragraphOpen || startsBlock(line, depth + 1)) break;
+      add(line); // A lazy paragraph continuation.
     }
     while (body.length > 1 && isBlank(body[body.length - 1])) body.pop();
     if (body.some(isBlank)) loose = true;
@@ -341,7 +378,7 @@ function renderBlock(block, doc) {
 
 // ---------------------------------------------------------------- inlines
 
-export function safeHref(raw) {
+function safeHref(raw) {
   const value = raw.trim();
   if (!value || /[\u0000- \u007f]/.test(value)) return null;
   const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(value);
@@ -363,9 +400,11 @@ function codeSpans(text) {
     if (text[index] !== "`") continue;
     let end = index;
     while (text[end] === "`") end += 1;
-    // An escaped first backtick is literal and cannot open a span.
-    const start = text[index - 1] === "\\" ? index + 1 : index;
-    if (end > start) runs.push({ start, length: end - start });
+    let slashes = 0;
+    while (text[index - 1 - slashes] === "\\") slashes += 1;
+    // Escapes only matter outside code: an escaped first backtick cannot open
+    // a span, but the whole run can still close one (as in `C:\`).
+    runs.push({ start: index, length: end - index, escaped: slashes % 2 === 1 });
     index = end - 1;
   }
   const byLength = new Map();
@@ -376,18 +415,18 @@ function codeSpans(text) {
   const spans = new Map();
   let cursor = 0;
   runs.forEach((run, position) => {
-    if (run.start < cursor) return;
-    const same = byLength.get(run.length);
+    const start = run.escaped ? run.start + 1 : run.start;
+    const length = run.escaped ? run.length - 1 : run.length;
+    if (start < cursor || length === 0) return;
+    const same = byLength.get(length);
+    if (!same) return;
     while (same.next < same.positions.length && same.positions[same.next] <= position) same.next += 1;
-    if (same.next >= same.positions.length) {
-      cursor = run.start + run.length;
-      return;
-    }
+    if (same.next >= same.positions.length) return;
     const closer = runs[same.positions[same.next]];
     same.next += 1;
-    let content = text.slice(run.start + run.length, closer.start).replace(/\n/g, " ");
+    let content = text.slice(start + length, closer.start).replace(/\n/g, " ");
     if (content.length > 1 && content[0] === " " && content[content.length - 1] === " " && content.trim()) content = content.slice(1, -1);
-    spans.set(run.start, { end: closer.start + closer.length, content });
+    spans.set(start, { end: closer.start + closer.length, content });
     cursor = closer.start + closer.length;
   });
   return spans;
@@ -406,7 +445,24 @@ function matchBrackets(text, spans) {
   return matches;
 }
 
-function linkTail(text, at) {
+// The next whitespace or ")" for every position, computed once per text, so
+// each link destination is rejected in constant time when it is too long.
+function terminators(text, scan) {
+  if (!scan.terminators) {
+    const next = new Int32Array(text.length + 1);
+    next[text.length] = text.length;
+    for (let index = text.length - 1; index >= 0; index -= 1) {
+      next[index] = text[index] === ")" || WHITESPACE.test(text[index]) ? index : next[index + 1];
+    }
+    scan.terminators = next;
+  }
+  return scan.terminators;
+}
+
+// A failed scan that reached the end of the text without a terminator proves
+// that every later candidate fails too, so the cache keeps link parsing linear.
+function linkTail(text, at, scan) {
+  if (at >= scan.deadEnd) return null;
   let index = at + 1;
   const skipSpaces = () => { while (text[index] === " " || text[index] === "\t") index += 1; };
   skipSpaces();
@@ -419,8 +475,10 @@ function linkTail(text, at) {
     index = end + 1;
   } else {
     const start = index;
+    if (terminators(text, scan)[start] - start > MAX_DESTINATION) return null;
     let depth = 0;
     for (; index < text.length; index += 1) {
+      if (index - start > MAX_DESTINATION) return null;
       const char = text[index];
       if (char === "\\" && index + 1 < text.length) index += 1;
       else if (char === "(") depth += 1;
@@ -428,6 +486,10 @@ function linkTail(text, at) {
         if (depth === 0) break;
         depth -= 1;
       } else if (WHITESPACE.test(char)) break;
+    }
+    if (index >= text.length) {
+      scan.deadEnd = Math.min(scan.deadEnd, at);
+      return null;
     }
     if (depth !== 0) return null;
     href = text.slice(start, index);
@@ -438,8 +500,8 @@ function linkTail(text, at) {
   if (quote === "\"" || quote === "'" || quote === "(") {
     const close = quote === "(" ? ")" : quote;
     let end = index + 1;
-    for (; end < text.length && text[end] !== close; end += 1) if (text[end] === "\\") end += 1;
-    if (end >= text.length) return null;
+    for (; end < text.length && text[end] !== close && end - index <= MAX_DESTINATION; end += 1) if (text[end] === "\\") end += 1;
+    if (end >= text.length || text[end] !== close) return null;
     title = text.slice(index + 1, end).replace(ESCAPED, "$1");
     index = end + 1;
     skipSpaces();
@@ -448,16 +510,24 @@ function linkTail(text, at) {
   return { href: href.replace(ESCAPED, "$1"), title, end: index + 1 };
 }
 
+const AUTHORITY = /[A-Za-z0-9.:@%[\]_-]/;
+
 function bareUrlEnd(text, start) {
   const head = text.slice(start, start + 8).toLowerCase();
   if (!head.startsWith("http://") && !head.startsWith("https://")) return 0;
-  let end = start;
+  // A URL wrapped in emphasis (**https://...**) ends at the closing delimiter.
+  const wrapper = "*_~".includes(text[start - 1] ?? "") ? text[start - 1] : "";
+  let end = start + head.indexOf("//") + 2;
+  // The host is ASCII, so Japanese text or markup right after it is not part of it.
+  while (end < text.length && AUTHORITY.test(text[end])) end += 1;
   let opens = 0;
   let closes = 0;
-  while (end < text.length && !URL_STOP.has(text[end]) && !WHITESPACE.test(text[end])) {
-    if (text[end] === "(") opens += 1;
-    else if (text[end] === ")") closes += 1;
-    end += 1;
+  if ("/?#".includes(text[end] ?? " ")) {
+    while (end < text.length && !URL_STOP.has(text[end]) && !WHITESPACE.test(text[end]) && text[end] !== wrapper) {
+      if (text[end] === "(") opens += 1;
+      else if (text[end] === ")") closes += 1;
+      end += 1;
+    }
   }
   while (end > start && URL_TRAILING.has(text[end - 1])) {
     if (text[end - 1] === ")") {
@@ -484,6 +554,7 @@ function tokenize(text, allowLinks) {
   const spans = codeSpans(text);
   const brackets = allowLinks ? matchBrackets(text, spans) : null;
   const tokens = [];
+  const scan = { deadEnd: Infinity, nextClose: -1 };
   let textStart = 0;
   const flush = (end) => {
     if (end > textStart) tokens.push({ type: "text", value: text.slice(textStart, end) });
@@ -511,7 +582,9 @@ function tokenize(text, allowLinks) {
       continue;
     }
     if (allowLinks && char === "<") {
-      const end = text.indexOf(">", index);
+      if (scan.nextClose !== -2 && scan.nextClose < index) scan.nextClose = text.indexOf(">", index + 1);
+      if (scan.nextClose === -1) scan.nextClose = -2;
+      const end = scan.nextClose;
       const candidate = end > index ? text.slice(index + 1, end) : "";
       const href = candidate && !/[\s<]/.test(candidate) ? safeHref(candidate) : null;
       if (href) {
@@ -534,7 +607,7 @@ function tokenize(text, allowLinks) {
     if (allowLinks && (char === "[" || (char === "!" && text[index + 1] === "["))) {
       const open = char === "!" ? index + 1 : index;
       const close = brackets.get(open);
-      const tail = close !== undefined && text[close + 1] === "(" ? linkTail(text, close + 1) : null;
+      const tail = close !== undefined && text[close + 1] === "(" ? linkTail(text, close + 1, scan) : null;
       if (tail) {
         flush(index);
         const label = text.slice(open + 1, close);
@@ -574,16 +647,16 @@ function tokenize(text, allowLinks) {
 // CommonMark-style delimiter matching. Matches are recorded on the runs and
 // always nest, so the tree is built afterwards in a single pass.
 function matchEmphasis(tokens) {
-  const stack = [];
+  const stacks = { "*": [], _: [], "~": [] };
   const bottom = { "*": 0, _: 0, "~": 0 };
   tokens.forEach((token, position) => {
     if (token.type !== "delim") return;
+    const stack = stacks[token.char];
     if (token.canClose) {
       while (token.remaining > 0) {
         let found = -1;
         for (let index = stack.length - 1; index >= Math.min(bottom[token.char], stack.length); index -= 1) {
           const opener = tokens[stack[index]];
-          if (opener.char !== token.char || opener.remaining === 0) continue;
           if (token.char === "~" && (opener.remaining !== 2 || token.remaining !== 2)) continue;
           const sum = opener.count + token.count;
           if (token.char !== "~" && (opener.canClose || token.canOpen) && sum % 3 === 0 && !(opener.count % 3 === 0 && token.count % 3 === 0)) continue;
@@ -591,7 +664,8 @@ function matchEmphasis(tokens) {
           break;
         }
         if (found < 0) break;
-        const opener = tokens[stack[found]];
+        const openerPosition = stack[found];
+        const opener = tokens[openerPosition];
         const use = token.char === "~" ? 2 : opener.remaining >= 2 && token.remaining >= 2 ? 2 : 1;
         const kind = token.char === "~" ? "del" : use === 2 ? "strong" : "em";
         opener.remaining -= use;
@@ -599,6 +673,10 @@ function matchEmphasis(tokens) {
         opener.opens.unshift(kind);
         token.closes.push(kind);
         stack.length = opener.remaining > 0 ? found + 1 : found;
+        // Delimiters inside a matched pair can no longer open, whatever their kind.
+        for (const other of Object.values(stacks)) {
+          while (other.length && other[other.length - 1] > openerPosition) other.pop();
+        }
       }
       if (token.remaining > 0 && !token.canOpen) bottom[token.char] = stack.length;
     }
@@ -618,12 +696,15 @@ function parseInline(text, allowLinks) {
     }
     for (const kind of token.closes) {
       const frame = stack.pop();
-      const parent = stack[stack.length - 1].children;
-      if (frame.flat) parent.push(...frame.children);
-      else parent.push({ type: kind, children: frame.children });
+      if (!frame.flat) stack[stack.length - 1].children.push({ type: kind, children: frame.children });
     }
     if (token.remaining) stack[stack.length - 1].children.push({ type: "text", value: token.char.repeat(token.remaining) });
-    for (const kind of token.opens) stack.push({ kind, flat: stack.length > MAX_INLINE_DEPTH, children: [] });
+    for (const kind of token.opens) {
+      const parent = stack[stack.length - 1];
+      // Past the limit, emphasis is dropped and children go straight to the
+      // deepest kept frame, so nothing is copied or spread later.
+      stack.push(stack.length > MAX_INLINE_DEPTH ? { flat: true, children: parent.children } : { kind, flat: false, children: [] });
+    }
   }
   return root.children;
 }

@@ -915,3 +915,22 @@ test('replies render as Markdown with copy buttons', async ({ page, context }) =
   await page.getByRole('button', { name: '返信をコピー', exact: true }).last().click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('## 旅の準備\n\n- [x] 予約');
 });
+
+test('the first streamed text updates only the reply in progress', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const first = await send(page, '最初のメッセージ');
+  await expect.poll(async () => (await run(page, first.id)).status).toBe('completed');
+  const { promise: holdEvents, resolve: releaseEvents } = Promise.withResolvers();
+  await page.route('**/v1/runs/*/events', async route => {
+    await holdEvents;
+    await route.continue();
+  });
+  const sent = await send(page, '停止テスト');
+  const earlier = await userRows(page).first().elementHandle();
+  releaseEvents();
+  await expect(assistantRows(page).last()).toHaveText('停止操作を待っています。');
+  expect(await earlier.evaluate(node => node.isConnected)).toBe(true);
+  await page.getByRole('button', { name: '停止', exact: true }).click();
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('cancelled');
+});

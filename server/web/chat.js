@@ -215,7 +215,8 @@ function renderMessages(forceScroll = false) {
     user.dataset.role = "user";
     user.dataset.runId = run.id;
     turn.append(user);
-    if (run.output_text) {
+    // An active run always has a reply node, so streamed text updates in place.
+    if (run.output_text || active(run)) {
       const assistant = element("div", "message assistant markdown");
       assistant.dataset.role = "assistant";
       assistant.dataset.runId = run.id;
@@ -311,10 +312,9 @@ function renderStreamingReply() {
   streamingFrame = 0;
   const run = runs.find((item) => item.id === streamingRunId);
   const reply = run && [...$("chat-log").querySelectorAll('[data-role="assistant"]')].find((node) => node.dataset.runId === run.id);
-  if (!reply || !active(run)) {
-    renderMessages();
-    return;
-  }
+  // A stale frame (finished run or another conversation) has nothing to do;
+  // completion and selection changes render the log themselves.
+  if (!reply || !active(run)) return;
   const area = $("message-area");
   const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
   reply.replaceChildren(renderMarkdown(run.output_text));
@@ -348,6 +348,8 @@ function resizeComposer() {
 }
 
 function cancelSelection() {
+  if (streamingFrame) cancelAnimationFrame(streamingFrame);
+  streamingFrame = 0;
   selection += 1;
   selectionAbort.abort();
   selectionAbort = new AbortController();

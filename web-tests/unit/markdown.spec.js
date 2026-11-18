@@ -98,6 +98,16 @@ test('links allow only web and mail addresses', async ({ page }) => {
   expect(await html(page, '[相対](/v1/session) と [危険](javascript:alert(1)) と ![x](data:image/png;base64,AAAA)')).toBe('<p>相対 と 危険 と x</p>');
 });
 
+test('code paths, fences in lists, URLs in emphasis and table escapes', async ({ page }) => {
+  expect(await html(page, '`C:\\`')).toBe('<p><code>C:\\</code></p>');
+  expect(await html(page, '- item\n  ```\n  code\n  ```\nOutdented prose')).toBe('<ul><li>item' + code('', 'code') + '</li></ul><p>Outdented prose</p>');
+  expect(await html(page, '- item\n  ```\n  code\nOutdented prose')).toBe('<ul><li>item' + code('', 'code') + '</li></ul><p>Outdented prose</p>');
+  expect(await html(page, '**https://example.com**です')).toBe(`<p><strong>${link('https://example.com', 'https://example.com')}</strong>です</p>`);
+  expect(await html(page, 'https://example.comです https://example.com/パス')).toBe(
+    `<p>${link('https://example.com', 'https://example.com')}です ${link('https://example.com/パス', 'https://example.com/パス')}</p>`);
+  expect(await html(page, '| `a\\|b` |\n|---|')).toBe('<div class="table-scroll"><table><thead><tr><th><code>a|b</code></th></tr></thead></table></div>');
+});
+
 test('hostile input never creates active content', async ({ page }) => {
   const corpus = [
     '<script>alert(1)</script>',
@@ -167,11 +177,19 @@ test('pathological replies render quickly', async ({ page }) => {
       lists: Array.from({ length: 2_000 }, (_, index) => `${' '.repeat(index * 2)}- 項目`).join('\n'),
       backticks: Array.from({ length: 1_500 }, (_, index) => '`'.repeat(index + 1) + 'x').join(' '),
       large: ('通常の段落です。**強調**と`コード`と https://example.com を含みます。\n').repeat(12_000),
+      wideTable: '|' + 'a|'.repeat(256) + '\n|' + '-|'.repeat(256) + '\n' + '|\n'.repeat(256),
+      openLinks: '[a]('.repeat(30_000),
+      spaceRun: 'a' + ' '.repeat(200_000) + 'b',
+      headingSpaces: '# a' + ' '.repeat(200_000) + 'b',
+      mixedDelimiters: '_a '.repeat(60_000) + '*b*'.repeat(60_000),
+      deepEmphasis: '*a '.repeat(70) + 'x '.repeat(300_000) + ' a*'.repeat(70),
     };
     return Object.fromEntries(Object.entries(inputs).map(([name, text]) => {
       const started = performance.now();
       const host = document.createElement('div');
       host.append(window.markdown.renderMarkdown(text));
+      // Padding table rows must not amplify a short reply into many cells.
+      if (host.querySelectorAll('th, td').length > 10_000) return [name, Infinity];
       return [name, performance.now() - started];
     }));
   });
