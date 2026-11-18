@@ -13,6 +13,8 @@ public endpoint, TLS, CORS, device pairing or an iPhone adapter.
 
 The client supports new/existing conversations, Japanese multiline input,
 streamed replies, Stop, event-stream reconnection and per-conversation drafts.
+Choose **新しい会話** to start writing immediately. The server saves a short
+title from the first accepted message and displays it in the conversation list.
 Tool activity appears as progress; tool arguments, results and reasoning do not
 appear as chat messages. Text is rendered literally, without HTML execution.
 The browser loads the latest 100 runs that fit in an 8 MiB response. It marks
@@ -55,6 +57,9 @@ not an independent verification of external effects or a per-tool approval syste
 `serve`で起動したサーバーのURLをブラウザで開くと、チャット画面を使えます。
 接続に使うのは`BY_HUMAN_API_TOKEN`です。ChatGPTのパスワードやトークンを入力する
 必要はありません。サーバー用トークンは画面を閉じたり再読み込みすると失われます。
+
+**新しい会話**を開くと、名前の入力なしですぐにメッセージを書けます。
+最初のメッセージが受け付けられると、その内容をもとにタイトルが付きます。
 
 下書きと送信結果の確認待ちは、このタブのsessionStorageに保存します。
 送信結果が不明なときは、同じ送信IDで確認し、新しいIDで送り直しません。

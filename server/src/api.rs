@@ -20,7 +20,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::store::{Run, Store, StoreError};
+use crate::store::{GENERATED_TITLE_CHARS, Run, Store, StoreError};
 
 const MAX_MESSAGE_BYTES: usize = 24 * 1024;
 const MAX_TITLE_BYTES: usize = 800;
@@ -121,15 +121,20 @@ async fn authenticate(
 
 #[derive(Deserialize)]
 struct NewConversation {
-    title: String,
+    title: Option<String>,
 }
 
 async fn create_conversation(
     State(state): State<ApiState>,
     Json(input): Json<NewConversation>,
 ) -> Result<impl IntoResponse, ApiError> {
-    nonempty(&input.title, MAX_TITLE_BYTES)?;
-    let conversation = state.store.create_conversation(&input.title).await?;
+    let conversation = match input.title {
+        Some(title) => {
+            nonempty(&title, MAX_TITLE_BYTES)?;
+            state.store.create_conversation(&title).await?
+        }
+        None => state.store.create_untitled_conversation().await?,
+    };
     Ok((StatusCode::CREATED, Json(conversation)))
 }
 
@@ -143,9 +148,9 @@ async fn get_conversation(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let conversation = state.store.get_conversation(id).await?;
     let messages = state.store.list_messages(id, 100).await?;
     let runs = state.store.list_runs(id, 100).await?;
+    let conversation = state.store.get_conversation(id).await?;
     let runs: Vec<_> = runs.iter().map(public_run).collect();
     Ok(Json(
         json!({"conversation": conversation, "messages": messages, "runs": runs}),
@@ -157,26 +162,40 @@ async fn chat_snapshot(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let conversation = state.store.get_conversation(id).await?;
+    let title_pending = conversation.title_pending;
     let mut snapshot =
         json!({"conversation": conversation, "runs": [], "older_runs_omitted": false});
     let mut bytes = serde_json::to_vec(&snapshot)
         .map_err(|_| StoreError::Storage)?
         .len();
-    let mut rows = std::pin::pin!(state.store.recent_runs(id, CHAT_SNAPSHOT_RUNS as i64 + 1));
+    if title_pending {
+        // A first message can commit while the run window is loading. Leave
+        // room for its title, whose normalized characters need at most four
+        // bytes each in JSON, including escaped quotes and backslashes.
+        bytes += 4 * GENERATED_TITLE_CHARS;
+    }
     let mut runs = Vec::new();
-    while let Some(run) = rows.try_next().await? {
-        let run = public_run(&run);
-        // Count the escaped JSON sent on the wire, including separators and
-        // the envelope. Keep a contiguous newest window and the latest run.
-        bytes += serde_json::to_vec(&run)
-            .map_err(|_| StoreError::Storage)?
-            .len()
-            + usize::from(!runs.is_empty());
-        if bytes > CHAT_SNAPSHOT_BYTES || runs.len() == CHAT_SNAPSHOT_RUNS {
-            snapshot["older_runs_omitted"] = json!(true);
-            break;
+    {
+        let mut rows = std::pin::pin!(state.store.recent_runs(id, CHAT_SNAPSHOT_RUNS as i64 + 1));
+        while let Some(run) = rows.try_next().await? {
+            let run = public_run(&run);
+            // Count the escaped JSON sent on the wire, including separators and
+            // the envelope. Keep a contiguous newest window and the latest run.
+            bytes += serde_json::to_vec(&run)
+                .map_err(|_| StoreError::Storage)?
+                .len()
+                + usize::from(!runs.is_empty());
+            if bytes > CHAT_SNAPSHOT_BYTES || runs.len() == CHAT_SNAPSHOT_RUNS {
+                snapshot["older_runs_omitted"] = json!(true);
+                break;
+            }
+            runs.push(run);
         }
-        runs.push(run);
+    }
+    if title_pending && !runs.is_empty() {
+        // A visible run was accepted with its title in the same transaction.
+        // Re-read after releasing the run stream's pooled connection.
+        snapshot["conversation"] = json!(state.store.get_conversation(id).await?);
     }
     snapshot["runs"] = Value::Array(runs);
     Ok(Json(snapshot))
@@ -212,7 +231,9 @@ async fn enqueue(
         StatusCode::OK
     };
     state.notifier.notify_one();
-    Ok((status, Json(public_run(&queued.run))))
+    let mut result = public_run(&queued.run);
+    result["conversation_title"] = json!(queued.conversation_title);
+    Ok((status, Json(result)))
 }
 
 async fn get_run(

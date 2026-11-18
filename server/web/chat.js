@@ -10,6 +10,7 @@ const unresolved = (run) => run?.status === "uncertain" && !run.reviewed_at;
 let token = "";
 let connection = 0;
 let selection = 0;
+let snapshotVersion = 0;
 let connectionAbort = new AbortController();
 let selectionAbort = new AbortController();
 let streamAbort = null;
@@ -163,6 +164,7 @@ function renderSidebar() {
   for (const conversation of conversations) {
     const button = element("button", "", conversation.title);
     button.type = "button";
+    button.dataset.conversationId = conversation.id;
     if (conversation.id === selectedId) button.setAttribute("aria-current", "page");
     button.addEventListener("click", () => selectConversation(conversation.id));
     list.append(button);
@@ -233,7 +235,8 @@ function renderControls() {
   $("stop").hidden = !busy;
   $("stop").disabled = !token || Boolean(busy?.cancel_requested) || stopping === busy?.id;
   $("run-progress").textContent = busy ? (busy.cancel_requested ? "停止を待っています" : progress || "応答を待っています") : "";
-  $("conversation-title").textContent = currentConversation?.title || "会話";
+  const listedTitle = conversations.find((item) => item.id === selectedId)?.title;
+  $("conversation-title").textContent = currentConversation?.title ?? listedTitle ?? "会話";
   const actions = $("run-actions");
   actions.replaceChildren();
   if (pending && !isSending() && !loading) {
@@ -293,11 +296,18 @@ function reconcileOutbox() {
   }
 }
 
-async function selectConversation(id) {
+function updateConversationTitle(id, title) {
+  if (typeof title !== "string") return;
+  const listed = conversations.find((item) => item.id === id);
+  if (listed) listed.title = title;
+  if (currentConversation?.id === id) currentConversation.title = title;
+}
+
+async function selectConversation(id, focusComposer = false) {
   if (!token || !UUID.test(id)) return;
   cancelSelection();
   selectedId = id;
-  currentConversation = conversations.find((item) => item.id === id) || null;
+  currentConversation = null;
   runs = [];
   olderRunsOmitted = false;
   loading = true;
@@ -307,25 +317,39 @@ async function selectConversation(id) {
   setDrawer(false);
   if (storageReady) showNotice();
   render(true);
+  await loadConversationSnapshot({ focusComposer });
+}
+
+async function loadConversationSnapshot({ focusComposer = false, refresh = false } = {}) {
   const captured = scope();
+  const version = ++snapshotVersion;
+  const ownsSnapshot = () => current(captured) && version === snapshotVersion;
   try {
-    const result = await api(`/conversations/${id}/snapshot`, { signal: selectionAbort.signal });
-    if (!current(captured)) return;
+    const result = await api(`/conversations/${captured.id}/snapshot`, { signal: selectionAbort.signal });
+    if (!ownsSnapshot()) return;
     currentConversation = result.conversation;
+    updateConversationTitle(captured.id, currentConversation.title);
     runs = result.runs;
     olderRunsOmitted = result.older_runs_omitted;
     reconcileOutbox();
     loading = false;
-    render(true);
+    render(!refresh);
+    if (focusComposer) $("message").focus();
     const run = runs.find(active);
     if (run) startStream(run.id, captured);
   } catch (error) {
-    if (!current(captured) || error.name === "AbortError") return;
+    if (!ownsSnapshot() || error.name === "AbortError") return;
     loading = false;
-    currentConversation = null;
+    if (!refresh) currentConversation = null;
     showNotice(friendlyError(error));
     render();
   }
+}
+
+function refreshCurrentConversation() {
+  loading = true;
+  renderControls();
+  return loadConversationSnapshot({ refresh: true });
 }
 
 function disconnect(message = "") {
@@ -341,12 +365,10 @@ function disconnect(message = "") {
   currentConversation = null;
   loading = false;
   creating = false;
-  $("create-conversation").disabled = false;
   $("message").value = "";
   $("server-token").value = "";
   $("connect-submit").disabled = false;
   $("connect-error").textContent = message;
-  $("new-dialog").close();
   setDrawer(false);
   render();
   if (!$("connect-dialog").open) $("connect-dialog").showModal();
@@ -384,40 +406,24 @@ async function connect(event) {
   }
 }
 
-function openNewConversation() {
+async function createConversation() {
   if (!token || creating) return;
-  $("new-error").textContent = "";
-  $("new-conversation-title").value = "";
-  $("new-dialog").showModal();
-}
-
-async function createConversation(event) {
-  event.preventDefault();
-  if (!token || creating) return;
-  const title = $("new-conversation-title").value.trim();
-  if (!title || [...title].length > 200 || encoder.encode(title).length > 800) {
-    $("new-error").textContent = "会話の名前を200文字以内で入力してください。";
-    return;
-  }
   creating = true;
-  $("create-conversation").disabled = true;
   const captured = scope();
+  renderSidebar();
   try {
-    const result = await api("/conversations", { method: "POST", body: { title } });
+    const result = await api("/conversations", { method: "POST", body: {} });
     if (captured.connection !== connection || !token) return;
     conversations.unshift(result);
-    if ($("new-dialog").open && captured.selection === selection) {
-      $("new-dialog").close();
-      await selectConversation(result.id);
-      $("message").focus();
-    }
-    renderSidebar();
+    if (current(captured)) await selectConversation(result.id, true);
   } catch (error) {
-    if (captured.connection === connection) $("new-error").textContent = friendlyError(error);
+    if (current(captured)) {
+      setDrawer(false);
+      showNotice(friendlyError(error));
+    }
   } finally {
     if (captured.connection === connection) {
       creating = false;
-      $("create-conversation").disabled = false;
       renderSidebar();
     }
   }
@@ -461,10 +467,12 @@ async function dispatch(pending) {
       if (selectedId === captured.id) renderControls();
       return;
     }
+    updateConversationTitle(captured.id, result.conversation_title);
     outbox.delete(captured.id);
     saveSession();
     if (!current(captured)) {
-      if (selectedId === captured.id) await selectConversation(captured.id);
+      if (selectedId === captured.id) await refreshCurrentConversation();
+      else renderSidebar();
       return;
     }
     replaceRun(result);
@@ -480,6 +488,11 @@ async function dispatch(pending) {
       saveSession();
     }
     if (selectedId !== captured.id || error.name === "AbortError") return;
+    if (error instanceof ApiError && error.status === 409) {
+      // Another client may already have submitted the first message.
+      await refreshCurrentConversation();
+      return;
+    }
     showNotice(friendlyError(error));
     render();
   }
@@ -750,10 +763,8 @@ function secureOrigin() {
 $("connect-form").addEventListener("submit", connect);
 $("connect-dialog").addEventListener("cancel", (event) => event.preventDefault());
 $("disconnect").addEventListener("click", () => disconnect());
-$("new-chat").addEventListener("click", openNewConversation);
-$("empty-new-chat").addEventListener("click", openNewConversation);
-$("new-form").addEventListener("submit", createConversation);
-$("cancel-new").addEventListener("click", () => $("new-dialog").close());
+$("new-chat").addEventListener("click", createConversation);
+$("empty-new-chat").addEventListener("click", createConversation);
 $("composer-form").addEventListener("submit", submit);
 $("message").addEventListener("input", () => {
   if (selectedId) { drafts.set(selectedId, $("message").value); saveSession(); }
