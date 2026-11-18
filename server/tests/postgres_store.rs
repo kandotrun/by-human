@@ -1565,6 +1565,28 @@ async fn search_snippets_are_short_and_come_from_the_newest_match() {
 }
 
 #[tokio::test]
+async fn search_takes_the_snippet_from_the_reply_when_both_messages_match() {
+    let f = Fixture::new().await;
+    let conversation = f.store.create_conversation("両方").await.unwrap();
+    let run = finished_run(
+        &f.store,
+        conversation.id,
+        "both",
+        "目印を探して",
+        "目印はここです",
+    )
+    .await;
+    assert_eq!(
+        search(&f.store, "目印").await,
+        [(
+            "両方".to_owned(),
+            Some((run, "assistant", "目印はここです".to_owned()))
+        )]
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
 async fn search_ignores_tool_records_reasoning_and_review_notes() {
     let f = Fixture::new().await;
     let owner = f.store.acquire_owner().await.unwrap();

@@ -1667,7 +1667,8 @@ test('search finds conversations by title and message text', async ({ page }) =>
   await searchBox(page).fill(`目印${suffix}`);
   await expect(listed).toHaveCount(1);
   await expect(conversationButton(page, id)).toBeVisible();
-  await expect(page.locator('#conversation-list .conversation-snippet')).toHaveText(`本文の目印${suffix}`);
+  // Both messages match; the reply is the newer one.
+  await expect(page.locator('#conversation-list .conversation-snippet')).toHaveText(`こんにちは。「本文の目印${suffix}」を受け取りました。`);
   await searchBox(page).fill(`検索タイトル${suffix}`);
   await expect(listed).toHaveCount(1);
   await expect(conversationButton(page, titled)).toBeVisible();

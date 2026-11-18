@@ -96,8 +96,10 @@ struct SearchRow {
 /// and no extension is needed. The query text is always a bound parameter;
 /// `strpos` treats LIKE wildcards and backslashes as ordinary characters.
 /// Tool records, reasoning items, events and review notes are never searched.
-/// The excerpt starts at most 10 characters before the match, so a
-/// 100-character match fits whole and a two-line preview shows where it starts.
+/// When both messages of the newest matching run match, the excerpt comes
+/// from the reply, the newer of the two. It starts at most 10 characters
+/// before the match, so a 100-character match fits whole and a two-line
+/// preview shows where it starts.
 const SEARCH_CONVERSATIONS: &str = "
 WITH hits AS (
     SELECT c.id, c.last_activity_at, m.run_id
@@ -113,8 +115,8 @@ WITH hits AS (
     ORDER BY c.last_activity_at DESC, c.id DESC
     LIMIT $2
 ), matched AS (
-    SELECT h.id, r.id AS run_id, strpos(lower(r.input_text), lower($1)) > 0 AS from_input,
-        CASE WHEN strpos(lower(r.input_text), lower($1)) > 0 THEN r.input_text ELSE r.output_text END AS text
+    SELECT h.id, r.id AS run_id, strpos(lower(r.output_text), lower($1)) = 0 AS from_input,
+        CASE WHEN strpos(lower(r.output_text), lower($1)) > 0 THEN r.output_text ELSE r.input_text END AS text
     FROM hits h JOIN runs r ON r.id = h.run_id
 ), placed AS (
     SELECT id, run_id, from_input, text,
