@@ -130,6 +130,12 @@ test('code paths, fences in lists, URLs in emphasis and table escapes', async ({
   // A fence in a quote ends with the quote, so a lazy line continues the paragraph after it.
   expect(await html(page, '- > ```\n  > code\n  ---\n  paragraph\ncontinued')).toBe(
     '<ul><li><blockquote>' + code('', 'code') + '</blockquote><hr>paragraph<br>continued</li></ul>');
+  // A marker after four or more spaces is text, as in parseBlocks, so the line stays a table row.
+  expect(await html(page, '- | a |\n  | - |\n      > x\n  row2\nlazy')).toBe(
+    '<ul><li><div class="table-scroll"><table><thead><tr><th>a</th></tr></thead><tbody><tr><td>&gt; x</td></tr><tr><td>row2</td></tr></tbody></table></div></li></ul><p>lazy</p>');
+  // In a nested item the same line is two spaces into the item's content, so it is a quote.
+  expect(await html(page, '- - | a |\n    | - |\n      > x\nlazy')).toBe(
+    '<ul><li><ul><li><div class="table-scroll"><table><thead><tr><th>a</th></tr></thead></table></div><blockquote><p>x</p></blockquote>lazy</li></ul></li></ul>');
 });
 
 test('hostile input never creates active content', async ({ page }) => {

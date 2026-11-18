@@ -238,6 +238,7 @@ function parseList(lines, start, first, depth) {
     let tableQuotes = 0;
     let paragraphOpen = false;
     let previous = "";
+    let nested = false;
     // Lazy continuation is allowed only while the innermost open block is a
     // paragraph. Fences and tables are tracked through nested item and quote
     // markers, so a block opened in a nested item also stops it. A fence ends
@@ -257,12 +258,16 @@ function parseList(lines, start, first, depth) {
       let items = 0;
       for (;;) {
         CONTAINER_MARKER.lastIndex = offset;
-        const marker = CONTAINER_MARKER.exec(inner);
+        // As in parseBlocks, a line indented four or more spaces has no
+        // markers. Once a nested item opens, indentation counts from its
+        // content column, which is not tracked, so markers are always read.
+        const marker = (nested || indentOf(content) < 4) && CONTAINER_MARKER.exec(inner);
         if (!marker || !marker[0] || (fenceOpen && (marker[0][0] !== ">" || quotes === fenceQuotes))) break;
         if (marker[0][0] === ">") quotes += 1;
         else items += 1;
         offset = CONTAINER_MARKER.lastIndex;
       }
+      if (items) nested = true;
       if (fenceOpen && quotes < fenceQuotes) {
         // The quote has ended and its fence with it, so the line is read
         // again as ordinary item content.
