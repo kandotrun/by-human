@@ -341,6 +341,7 @@ function disconnect(message = "") {
   currentConversation = null;
   loading = false;
   creating = false;
+  $("create-conversation").disabled = false;
   $("message").value = "";
   $("server-token").value = "";
   $("connect-submit").disabled = false;

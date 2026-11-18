@@ -82,6 +82,24 @@ test('Japanese send has one transcript row, clears the draft and never stores th
   await page.screenshot({ path: testInfo.outputPath('desktop-chat.png'), fullPage: true });
 });
 
+test('conversation creation is available after reconnecting from a rejected token', async ({ page }) => {
+  await connect(page);
+  await page.route('**/v1/conversations', route => {
+    const request = route.request();
+    if (request.method() === 'POST' && request.postDataJSON().title === '認証切れ') {
+      return route.fulfill({ status: 401 });
+    }
+    return route.continue();
+  });
+  await page.getByRole('button', { name: '新しい会話', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '新しい会話', exact: true });
+  await dialog.getByLabel('会話の名前', { exact: true }).fill('認証切れ');
+  await dialog.getByRole('button', { name: '作成', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'by-human に接続', exact: true })).toBeVisible();
+  await connect(page, false);
+  await newConversation(page, '再接続後に作成');
+});
+
 test('IME confirmation Enter does not submit and untrusted HTML stays text', async ({ page }) => {
   await connect(page);
   const id = await newConversation(page, '変換と表示');
