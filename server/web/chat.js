@@ -364,6 +364,8 @@ function renderDeleteDialog() {
   const id = deleteTarget;
   // The server refuses too; this only explains it before asking.
   const busy = sending.has(id) || (id === selectedId && runs.some((run) => active(run) || unresolved(run)));
+  // The open conversation's loaded history shows when the refused work has settled.
+  if (!busy && !loading && currentConversation?.id === id && deleteError === DELETE_BUSY) deleteError = "";
   $("delete-error").textContent = busy ? DELETE_BUSY : deleteError;
   $("delete-confirm").disabled = deleting || busy;
 }

@@ -1474,6 +1474,10 @@ test('the delete dialog follows work that ends or starts while it is open', asyn
     await confirm.click();
     await expect(dialog.getByRole('alert')).toHaveText(busy);
     await expect(confirm).toBeDisabled();
+    // The refreshed history follows that work, so its end answers the refusal.
+    await page.request.post(`/v1/runs/${second}/cancel`, { headers: auth });
+    await expect(confirm).toBeEnabled();
+    await expect(dialog.getByRole('alert')).toBeEmpty();
   } finally {
     for (const runId of [first.id, second]) {
       if (!runId) continue;
