@@ -1703,12 +1703,33 @@ test('search snippets show reply text as plain text', async ({ page }) => {
   await connect(page);
   await newConversation(page);
   const marker = `検索XSS${Date.now().toString(36)}`;
-  const sent = await send(page, `<img src=x onerror="window.injected=1">${marker}`);
+  const sent = await send(page, `${marker}<img src=x onerror="window.injected=1">`);
   await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
   await searchBox(page).fill(marker);
-  await expect(page.locator('#conversation-list .conversation-snippet')).toContainText(`<img src=x onerror="window.injected=1">${marker}`);
+  await expect(page.locator('#conversation-list .conversation-snippet')).toContainText(`${marker}<img src=x onerror="window.injected=1">`);
   await expect(page.locator('#conversation-list img')).toHaveCount(0);
   expect(await page.evaluate(() => window.injected)).toBeUndefined();
+});
+
+test('a search snippet begins near the match so its two lines show it', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const marker = `見える目印${Date.now().toString(36)}`;
+  const sent = await send(page, `${'長い前置きの文章です。'.repeat(6)}${marker}`);
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  await searchBox(page).fill(marker);
+  const snippet = page.locator('#conversation-list .conversation-snippet');
+  await expect(snippet).toContainText(marker);
+  // The snippet is clamped to two lines; the match must start on the first.
+  const line = await snippet.evaluate((node, text) => {
+    const range = document.createRange();
+    const start = node.textContent.indexOf(text);
+    range.setStart(node.firstChild, start);
+    range.setEnd(node.firstChild, start + 1);
+    const top = range.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    return Math.floor(top / parseFloat(getComputedStyle(node).lineHeight));
+  }, marker);
+  expect(line).toBe(0);
 });
 
 test('the list says when older conversations exist', async ({ page }) => {

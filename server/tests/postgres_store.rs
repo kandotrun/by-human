@@ -1523,9 +1523,30 @@ async fn search_snippets_are_short_and_come_from_the_newest_match() {
     let found = search(&f.store, "目印").await;
     let (run, role, snippet) = found[0].1.clone().unwrap();
     assert_eq!((run, role), (newest, "assistant"));
-    assert!(snippet.starts_with('…') && snippet.ends_with('…'));
-    assert!(snippet.contains(&format!("{}目印{}", "あ".repeat(40), "い".repeat(79))));
-    assert!(snippet.chars().count() <= 123);
+    // The excerpt starts 10 characters before the match.
+    assert_eq!(
+        snippet,
+        format!("…{}目印{}…", "あ".repeat(10), "い".repeat(109))
+    );
+    // At most 121 characters of text plus an ellipsis at each cut end.
+    assert!(snippet.chars().count() <= 121 + 2);
+
+    // A 100-character match is shown whole.
+    let query = "う".repeat(100);
+    let wide = f.store.create_conversation("長い検索語").await.unwrap();
+    let text = format!("{}{query}{}", "あ".repeat(300), "い".repeat(300));
+    let wide_run = finished_run(&f.store, wide.id, "wide", "長い語を探す", &text).await;
+    assert_eq!(
+        search(&f.store, &query).await,
+        [(
+            "長い検索語".to_owned(),
+            Some((
+                wide_run,
+                "assistant",
+                format!("…{}{query}{}…", "あ".repeat(10), "い".repeat(11))
+            ))
+        )]
+    );
 
     let spaced = f.store.create_conversation("改行").await.unwrap();
     finished_run(
