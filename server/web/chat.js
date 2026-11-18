@@ -210,7 +210,8 @@ function renderSidebar() {
   $("connection-state").textContent = signedIn ? "ログイン中" : "未ログイン";
   $("connection-state").classList.toggle("connected", signedIn);
   const list = $("conversation-list");
-  // Rows are rebuilt, so keyboard focus moves to the same row's new control.
+  // Rows are rebuilt, so keyboard focus moves to the same row's new control,
+  // or to the search field when the row has left the search results.
   const focused = list.contains(document.activeElement) ? document.activeElement : null;
   const focusSelector = focused?.dataset.conversationId ? `[data-conversation-id="${focused.dataset.conversationId}"]`
     : focused?.dataset.menuFor ? `[data-menu-for="${focused.dataset.menuFor}"]` : "";
@@ -270,7 +271,7 @@ function renderSidebar() {
   else if (!searching && signedIn && !conversations.length) list.append(element("p", "sidebar-empty", "会話はまだありません"));
   if (searching && searchTruncated) list.append(element("p", "sidebar-more", "新しい順に50件まで表示しています。語句を足すと絞り込めます。"));
   if (!searching && hasMore) list.append(element("p", "sidebar-more", "これより古い会話は検索で探せます。"));
-  if (focusSelector) list.querySelector(focusSelector)?.focus();
+  if (focusSelector) (list.querySelector(focusSelector) ?? (searching ? $("conversation-query") : null))?.focus();
 }
 
 // Local calendar days: today, yesterday, the 7 days before, then months.

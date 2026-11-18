@@ -1801,6 +1801,26 @@ test('renaming or deleting during a search refreshes its results', async ({ page
   }
 });
 
+test('renaming a search result by keyboard so it no longer matches moves focus to the search field', async ({ page }) => {
+  const suffix = Date.now().toString(36);
+  const id = await createTitled(page, `外れる名前${suffix}`);
+  await connect(page);
+  await searchBox(page).fill(`外れる名前${suffix}`);
+  await expect(page.locator('#conversation-list [data-conversation-id]')).toHaveCount(1);
+  await menuButton(page, id).focus();
+  await page.keyboard.press('Enter');
+  await expect(conversationMenu(page).getByRole('button', { name: '名前を変更', exact: true })).toBeFocused();
+  await page.keyboard.press('Enter');
+  const input = renameDialog(page).getByLabel('名前', { exact: true });
+  await expect(input).toBeFocused();
+  await input.fill(`別の名前${suffix}`);
+  await page.keyboard.press('Enter');
+  await expect(renameDialog(page)).toBeHidden();
+  // The refreshed results drop the row whose menu button had focus.
+  await expect(conversationButton(page, id)).toHaveCount(0);
+  await expect(searchBox(page)).toBeFocused();
+});
+
 test('a changed query ignores the answer for the previous one', async ({ page }) => {
   const suffix = Date.now().toString(36);
   const before = await createTitled(page, `前の語${suffix}`);
