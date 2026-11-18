@@ -700,7 +700,7 @@ test('an offscreen title refresh finds a conversation outside the newest list wi
   const id = await createConversation();
   for (let index = 0; index < 99; index += 1) await createConversation();
   await connect(page);
-  await expect(page.locator('#conversation-list button')).toHaveCount(100);
+  await expect(page.locator('#conversation-list [data-conversation-id]')).toHaveCount(100);
   await conversationButton(page, id).click();
   await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
   await expect(composer(page)).toBeEnabled();
@@ -724,9 +724,14 @@ test('an offscreen title refresh finds a conversation outside the newest list wi
     await page.getByRole('button', { name: '送信', exact: true }).click();
     await sending;
     const created = await newConversation(page);
-    // The newly created conversation pushes the older one out of the server's newest 100.
-    const listed = await page.request.get('/v1/conversations', { headers: auth });
-    expect((await listed.json()).conversations.some(item => item.id === id)).toBeFalsy();
+    // Simulate the conversation falling outside the server's newest 100.
+    await page.route('**/v1/conversations', async route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const response = await route.fetch();
+      const body = await response.json();
+      body.conversations = body.conversations.filter(item => item.id !== id);
+      await route.fulfill({ response, json: body });
+    });
 
     releaseConflict();
     await expect(conversationButton(page, id)).toHaveText('停止テスト');
@@ -1190,4 +1195,216 @@ test('text and controls keep WCAG contrast in light and dark themes', async ({ p
     await page.emulateMedia({ colorScheme });
     expect.soft(await failures(), colorScheme).toEqual([]);
   }
+});
+
+const menuButton = (page, id) => page.locator(`#conversation-list [data-menu-for="${id}"]`);
+const conversationMenu = page => page.locator('#conversation-menu');
+const renameDialog = page => page.getByRole('dialog', { name: '会話の名前を変更', exact: true });
+const deleteDialog = page => page.getByRole('dialog', { name: '会話を削除しますか？', exact: true });
+const firstListed = page => page.locator('#conversation-list [data-conversation-id]').first();
+
+async function createTitled(page, title) {
+  const response = await page.request.post('/v1/conversations', { headers: auth, data: { title } });
+  expect(response.status()).toBe(201);
+  return (await response.json()).id;
+}
+
+async function openMenu(page, id, item) {
+  await menuButton(page, id).click();
+  await expect(conversationMenu(page)).toBeVisible();
+  await conversationMenu(page).getByRole('button', { name: item, exact: true }).click();
+}
+
+test.describe('in Tokyo time', () => {
+  test.use({ timezoneId: 'Asia/Tokyo' });
+
+  test('the sidebar groups conversations by local date', async ({ page }) => {
+    await page.clock.setFixedTime(new Date('2026-11-18T12:00:00+09:00'));
+    const groups = [
+      ['今日', '2026-11-18T00:00:00+09:00'],
+      ['昨日', '2026-11-17T23:59:59+09:00'],
+      ['過去 7 日間', '2026-11-11T00:00:00+09:00'],
+      ['11月', '2026-11-10T23:59:59+09:00'],
+      ['10月', '2026-10-31T12:00:00+09:00'],
+      ['2025年12月', '2025-12-31T12:00:00+09:00'],
+    ];
+    const rows = [];
+    for (const [label, at] of groups) {
+      rows.push({ id: await createTitled(page, `${label}の会話`), title: `${label}の会話`, created_at: at, last_activity_at: at });
+    }
+    await page.route('**/v1/conversations', route => route.request().method() === 'GET'
+      ? route.fulfill({ json: { conversations: rows } })
+      : route.continue());
+    await connect(page);
+    await expect(page.locator('#conversation-list h2')).toHaveText(groups.map(([label]) => label));
+    for (const [label] of groups) {
+      const group = page.getByRole('list', { name: label, exact: true });
+      await expect(group.getByRole('button', { name: `${label}の会話`, exact: true })).toBeVisible();
+    }
+  });
+});
+
+test('sending moves a conversation to the top of the list', async ({ page }) => {
+  await connect(page);
+  const older = await newConversation(page);
+  const first = await send(page, '並び順テスト');
+  await expect.poll(async () => (await run(page, first.id)).status).toBe('completed');
+  const newer = await newConversation(page);
+  await expect(firstListed(page)).toHaveAttribute('data-conversation-id', newer);
+  await conversationButton(page, older).click();
+  await expect(composer(page)).toBeEnabled();
+  await send(page, 'もう一度');
+  await expect(firstListed(page)).toHaveAttribute('data-conversation-id', older);
+  await page.reload();
+  await expectSignedIn(page);
+  await expect(firstListed(page)).toHaveAttribute('data-conversation-id', older);
+});
+
+test('a conversation can be renamed from its menu by keyboard', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const more = menuButton(page, id);
+  await expect(more).toHaveAccessibleName('「新しい会話」の操作');
+  await more.focus();
+  await page.keyboard.press('Enter');
+  const rename = conversationMenu(page).getByRole('button', { name: '名前を変更', exact: true });
+  await expect(rename).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(conversationMenu(page)).toBeHidden();
+  await expect(more).toBeFocused();
+
+  await page.keyboard.press('Enter');
+  await expect(rename).toBeFocused();
+  await page.keyboard.press('Enter');
+  const dialog = renameDialog(page);
+  const input = dialog.getByLabel('名前', { exact: true });
+  await expect(input).toHaveValue('新しい会話');
+  await expect(input).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(more).toBeFocused();
+
+  await openMenu(page, id, '名前を変更');
+  await input.fill('旅の計画');
+  await page.keyboard.press('Enter');
+  await expect(dialog).toBeHidden();
+  await expect(conversationButton(page, id)).toHaveText('旅の計画');
+  await expect(conversationTitle(page)).toHaveText('旅の計画');
+  await expect(more).toBeFocused();
+  await page.reload();
+  await expectSignedIn(page);
+  await expect(conversationButton(page, id)).toHaveText('旅の計画');
+  await conversationButton(page, id).click();
+  await expect(composer(page)).toBeEnabled();
+  const sent = await send(page, '自動の名前にならないメッセージ');
+  expect(sent.conversation_title).toBe('旅の計画');
+  await expect(conversationTitle(page)).toHaveText('旅の計画');
+});
+
+test('renaming checks the name and skips an unchanged one', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  let patches = 0;
+  page.on('request', request => { if (request.method() === 'PATCH') patches += 1; });
+  await openMenu(page, id, '名前を変更');
+  const dialog = renameDialog(page);
+  await dialog.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await openMenu(page, id, '名前を変更');
+  await dialog.getByLabel('名前', { exact: true }).fill('   ');
+  await dialog.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('名前を入力してください。');
+  await dialog.getByRole('button', { name: 'キャンセル', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(patches).toBe(0);
+  await expect(conversationButton(page, id)).toHaveText('新しい会話');
+});
+
+test('deleting a conversation asks first and forgets it in this tab', async ({ page }) => {
+  await connect(page);
+  const keep = await newConversation(page);
+  const id = await newConversation(page);
+  await composer(page).fill('消える下書き');
+  await openMenu(page, id, '削除');
+  const dialog = deleteDialog(page);
+  await expect(dialog).toContainText('「新しい会話」');
+  await expect(dialog).toContainText('このタブの下書きと送信待ちのメッセージも削除されます。');
+  await expect(dialog.getByRole('button', { name: 'キャンセル', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(conversationButton(page, id)).toBeVisible();
+
+  await openMenu(page, id, '削除');
+  await dialog.getByRole('button', { name: '削除', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(conversationButton(page, id)).toHaveCount(0);
+  await expect(page.locator('#empty-state h2')).toHaveText('何から始めますか？');
+  await expect(conversationTitle(page)).toHaveText('会話');
+  await expect(conversationButton(page, keep)).toBeFocused();
+  const stored = await page.evaluate(() => sessionStorage.getItem('by-human-chat-v1'));
+  expect(stored).not.toContain(id);
+  expect(stored).not.toContain('消える下書き');
+  expect((await page.request.get(`/v1/conversations/${id}`, { headers: auth })).status()).toBe(404);
+});
+
+test('a busy conversation cannot be deleted', async ({ page }) => {
+  await connect(page);
+  const other = await newConversation(page);
+  const background = await page.request.post(`/v1/conversations/${other}/runs`, {
+    headers: auth,
+    data: { message: '停止テスト', idempotency_key: `delete-busy-other-${Date.now()}` },
+  });
+  expect(background.status()).toBe(202);
+  const id = await newConversation(page);
+  const sent = await send(page, '停止テスト');
+  try {
+    await openMenu(page, id, '削除');
+    const dialog = deleteDialog(page);
+    const busy = '実行中の処理か、確認が必要な実行結果があるため削除できません。';
+    await expect(dialog.getByRole('alert')).toHaveText(busy);
+    await expect(dialog.getByRole('button', { name: '削除', exact: true })).toBeDisabled();
+    await dialog.getByRole('button', { name: 'キャンセル', exact: true }).click();
+
+    await openMenu(page, other, '削除');
+    await expect(dialog.getByRole('button', { name: '削除', exact: true })).toBeEnabled();
+    await dialog.getByRole('button', { name: '削除', exact: true }).click();
+    await expect(dialog.getByRole('alert')).toHaveText(busy);
+    await dialog.getByRole('button', { name: 'キャンセル', exact: true }).click();
+    await expect(conversationButton(page, other)).toBeVisible();
+  } finally {
+    const { id: otherRun } = await background.json();
+    for (const runId of [sent.id, otherRun]) {
+      await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+      await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+    }
+  }
+});
+
+test('a conversation deleted elsewhere disappears when opened', async ({ page }) => {
+  await connect(page);
+  const gone = await newConversation(page);
+  await newConversation(page);
+  expect((await page.request.delete(`/v1/conversations/${gone}`, { headers: auth })).status()).toBe(204);
+  await conversationButton(page, gone).click();
+  await expect(conversationButton(page, gone)).toHaveCount(0);
+  await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
+});
+
+test('a message sent to a conversation deleted elsewhere can be returned', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  expect((await page.request.delete(`/v1/conversations/${id}`, { headers: auth })).status()).toBe(204);
+  await composer(page).fill('届かないメッセージ');
+  await page.getByRole('button', { name: '送信', exact: true }).click();
+  await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
+  await page.getByRole('button', { name: '入力欄に戻す', exact: true }).click();
+  await expect(composer(page)).toHaveValue('届かないメッセージ');
+});
+
+test('the list reloads when the tab becomes visible again', async ({ page }) => {
+  await connect(page);
+  const created = await createTitled(page, '別のタブで作成');
+  await expect(conversationButton(page, created)).toHaveCount(0);
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect(conversationButton(page, created)).toHaveText('別のタブで作成');
 });

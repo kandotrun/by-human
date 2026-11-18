@@ -14,6 +14,8 @@ const SIGNED_OUT = "ログインの有効期限が切れたか、ログアウト
 // Closer to the bottom than this, replies follow new text and the jump button
 // stays hidden.
 const FOLLOW_DISTANCE = 100;
+const DELETED = "この会話は削除されています。";
+const DELETE_BUSY = "実行中の処理か、確認が必要な実行結果があるため削除できません。";
 
 let signedIn = false;
 let signingOut = false;
@@ -42,6 +44,15 @@ let reviewRequest = 0;
 let resolving = false;
 let storageReadable = true;
 let storageReady = true;
+// A list response is applied only if no newer request or local change
+// (create, send, rename, delete) happened since it was requested.
+let listGeneration = 0;
+let menuFor = "";
+let renameTarget = "";
+let renaming = false;
+let deleteTarget = "";
+let deleting = false;
+let focusAfterDelete = "";
 const drafts = new Map();
 const outbox = new Map();
 const sending = new Map();
@@ -185,16 +196,226 @@ function renderSidebar() {
   $("connection-state").textContent = signedIn ? "ログイン中" : "未ログイン";
   $("connection-state").classList.toggle("connected", signedIn);
   const list = $("conversation-list");
+  // Rows are rebuilt, so keyboard focus moves to the same row's new control.
+  const focused = list.contains(document.activeElement) ? document.activeElement : null;
+  const focusSelector = focused?.dataset.conversationId ? `[data-conversation-id="${focused.dataset.conversationId}"]`
+    : focused?.dataset.menuFor ? `[data-menu-for="${focused.dataset.menuFor}"]` : "";
+  const menuOpen = $("conversation-menu").matches(":popover-open");
   list.replaceChildren();
+  const now = new Date();
+  let group = null;
+  let label = "";
   for (const conversation of conversations) {
-    const button = element("button", "", conversation.title);
-    button.type = "button";
-    button.dataset.conversationId = conversation.id;
-    if (conversation.id === selectedId) button.setAttribute("aria-current", "page");
-    button.addEventListener("click", () => selectConversation(conversation.id));
-    list.append(button);
+    const next = activityGroup(conversation.last_activity_at ?? conversation.created_at, now);
+    if (!group || next !== label) {
+      label = next;
+      const heading = element("h2", "conversation-group", label);
+      heading.id = `conversation-group-${list.childElementCount}`;
+      group = element("ul", "conversation-items");
+      group.setAttribute("aria-labelledby", heading.id);
+      list.append(heading, group);
+    }
+    const item = element("li", "conversation-item");
+    const select = element("button", "conversation-select", conversation.title);
+    select.type = "button";
+    select.dataset.conversationId = conversation.id;
+    if (conversation.id === selectedId) {
+      select.setAttribute("aria-current", "page");
+      item.classList.add("current");
+    }
+    select.addEventListener("click", () => selectConversation(conversation.id));
+    const more = element("button", "conversation-more", "⋯");
+    more.type = "button";
+    more.dataset.menuFor = conversation.id;
+    more.setAttribute("aria-label", `「${conversation.title}」の操作`);
+    more.popoverTargetElement = $("conversation-menu");
+    more.addEventListener("click", (event) => targetMenu(event, conversation.id));
+    if (menuOpen && menuFor === conversation.id) item.classList.add("menu-open");
+    item.append(select, more);
+    group.append(item);
   }
   if (signedIn && !conversations.length) list.append(element("p", "sidebar-empty", "会話はまだありません"));
+  if (focusSelector) list.querySelector(focusSelector)?.focus();
+}
+
+// Local calendar days: today, yesterday, the 7 days before, then months.
+function activityGroup(at, now) {
+  const time = new Date(at);
+  const midnight = (days) => new Date(now.getFullYear(), now.getMonth(), now.getDate() - days);
+  if (!(time < midnight(0))) return "今日";
+  if (time >= midnight(1)) return "昨日";
+  if (time >= midnight(7)) return "過去 7 日間";
+  const month = `${time.getMonth() + 1}月`;
+  return time.getFullYear() === now.getFullYear() ? month : `${time.getFullYear()}年${month}`;
+}
+
+const menuButton = (id) => document.querySelector(`#conversation-list [data-menu-for="${id}"]`);
+const rowButton = (id) => document.querySelector(`#conversation-list [data-conversation-id="${id}"]`);
+
+// Runs before the popover toggles. A second row retargets the open menu
+// instead of closing it.
+function targetMenu(event, id) {
+  const open = $("conversation-menu").matches(":popover-open");
+  if (open && menuFor !== id) {
+    event.preventDefault();
+    markMenuRow(false);
+    menuFor = id;
+    markMenuRow(true);
+    placeMenu();
+    $("menu-rename").focus();
+  } else if (!open) menuFor = id;
+}
+
+// Keeps the row's ⋯ visible while its menu is open.
+function markMenuRow(open) {
+  menuButton(menuFor)?.closest(".conversation-item")?.classList.toggle("menu-open", open);
+}
+
+function placeMenu() {
+  const menu = $("conversation-menu");
+  const trigger = menuButton(menuFor);
+  if (!trigger) return;
+  const rect = trigger.getBoundingClientRect();
+  const height = menu.offsetHeight || 96;
+  const below = rect.bottom + 4;
+  menu.style.top = `${below + height + 8 > innerHeight ? Math.max(8, rect.top - height - 4) : below}px`;
+  menu.style.right = `${Math.max(8, innerWidth - rect.right)}px`;
+}
+
+function closeMenu() {
+  if ($("conversation-menu").matches(":popover-open")) $("conversation-menu").hidePopover();
+}
+
+function openRename(id) {
+  const conversation = conversations.find((item) => item.id === id);
+  if (!conversation) return;
+  renameTarget = id;
+  $("rename-input").value = conversation.title;
+  $("rename-error").textContent = "";
+  $("rename-dialog").showModal();
+  $("rename-input").select();
+}
+
+async function rename(event) {
+  event.preventDefault();
+  if (renaming) return;
+  const id = renameTarget;
+  const conversation = conversations.find((item) => item.id === id);
+  const title = $("rename-input").value.trim();
+  if (!conversation) return $("rename-dialog").close();
+  if (!title) {
+    $("rename-error").textContent = "名前を入力してください。";
+    return;
+  }
+  // An unchanged name would only turn off automatic titling.
+  if (title === conversation.title) return $("rename-dialog").close();
+  // A pending send's response carries the title it saw and would undo this.
+  if (sending.has(id)) {
+    $("rename-error").textContent = "送信が終わってから、もう一度保存してください。";
+    return;
+  }
+  const capturedConnection = connection;
+  renaming = true;
+  $("rename-save").disabled = true;
+  try {
+    const result = await api(`/conversations/${id}`, { method: "PATCH", body: { title } });
+    if (capturedConnection !== connection) return;
+    listGeneration += 1;
+    updateConversationTitle(id, result.title);
+    $("rename-dialog").close();
+    // A snapshot already in flight would bring back the previous title.
+    if (selectedId === id && loading) refreshCurrentConversation();
+    renderSidebar();
+    renderControls();
+  } catch (error) {
+    if (capturedConnection !== connection) return;
+    if (error instanceof ApiError && error.status === 404) {
+      $("rename-dialog").close();
+      forgetConversation(id, true);
+      return;
+    }
+    $("rename-error").textContent = error instanceof ApiError && error.status === 400 ? "名前を1〜200文字で入力してください。" : friendlyError(error);
+  } finally {
+    renaming = false;
+    $("rename-save").disabled = false;
+  }
+}
+
+function openDelete(id) {
+  const conversation = conversations.find((item) => item.id === id);
+  if (!conversation) return;
+  deleteTarget = id;
+  focusAfterDelete = "";
+  const local = Boolean(drafts.get(id)?.trim()) || outbox.has(id);
+  $("delete-description").textContent = `「${conversation.title}」のメッセージと実行記録を完全に削除します。元に戻すことはできません。${local ? "このタブの下書きと送信待ちのメッセージも削除されます。" : ""}`;
+  // The server refuses too; this only explains it before asking.
+  const busy = sending.has(id) || (id === selectedId && runs.some((run) => active(run) || unresolved(run)));
+  $("delete-error").textContent = busy ? DELETE_BUSY : "";
+  $("delete-confirm").disabled = busy;
+  $("delete-dialog").showModal();
+}
+
+async function confirmDelete() {
+  if (deleting) return;
+  const id = deleteTarget;
+  const capturedConnection = connection;
+  deleting = true;
+  $("delete-confirm").disabled = true;
+  try {
+    await api(`/conversations/${id}`, { method: "DELETE" });
+    if (capturedConnection !== connection) return;
+    deleted(id);
+  } catch (error) {
+    if (capturedConnection !== connection) return;
+    if (error instanceof ApiError && error.status === 404) return deleted(id);
+    const busy = error instanceof ApiError && error.status === 409;
+    $("delete-error").textContent = busy ? DELETE_BUSY : friendlyError(error);
+    if (busy && selectedId === id) refreshCurrentConversation();
+  } finally {
+    deleting = false;
+    if ($("delete-dialog").open) $("delete-confirm").disabled = false;
+  }
+}
+
+function deleted(id) {
+  const index = conversations.findIndex((item) => item.id === id);
+  focusAfterDelete = (conversations[index + 1] ?? conversations[index - 1])?.id ?? "";
+  forgetConversation(id);
+  $("delete-dialog").close();
+}
+
+// Drops a deleted conversation and this tab's draft and pending text for it.
+function forgetConversation(id, notice = false) {
+  listGeneration += 1;
+  conversations = conversations.filter((item) => item.id !== id);
+  drafts.delete(id);
+  outbox.delete(id);
+  sending.delete(id);
+  if (selectedId === id) {
+    cancelSelection();
+    selectedId = "";
+    currentConversation = null;
+    runs = [];
+    olderRunsOmitted = false;
+    loading = false;
+    $("message").value = "";
+    resizeComposer();
+  }
+  saveSession();
+  if (notice) showNotice(DELETED);
+  render();
+}
+
+// Keeps the list in activity order after an accepted message.
+function touchConversation(id, at) {
+  const index = conversations.findIndex((item) => item.id === id);
+  if (index < 0 || typeof at !== "string") return;
+  const [conversation] = conversations.splice(index, 1);
+  if (!(Date.parse(conversation.last_activity_at) >= Date.parse(at))) conversation.last_activity_at = at;
+  const time = Date.parse(conversation.last_activity_at);
+  const position = conversations.findIndex((item) => !(Date.parse(item.last_activity_at) > time));
+  conversations.splice(position < 0 ? conversations.length : position, 0, conversation);
+  listGeneration += 1;
 }
 
 function runStatus(run) {
@@ -439,8 +660,9 @@ function cancelSelection() {
 }
 
 async function refreshConversations(capturedConnection = connection) {
+  const generation = ++listGeneration;
   const result = await api("/conversations");
-  if (capturedConnection !== connection || !signedIn) return;
+  if (capturedConnection !== connection || !signedIn || generation !== listGeneration) return;
   conversations = result.conversations.filter((item) => UUID.test(item.id));
   listed = true;
   renderSidebar();
@@ -526,6 +748,7 @@ async function loadConversationSnapshot({ focusComposer = false, refresh = false
     if (run) startStream(run.id, captured);
   } catch (error) {
     if (!ownsSnapshot() || error.name === "AbortError") return;
+    if (error instanceof ApiError && error.status === 404) return forgetConversation(captured.id, true);
     loading = false;
     // The displayed runs can predate an accepted send or conflict.
     currentConversation = null;
@@ -545,6 +768,8 @@ function disconnect(message = "") {
   connectionAbort.abort();
   connectionAbort = new AbortController();
   cancelSelection();
+  closeMenu();
+  for (const dialog of ["rename-dialog", "delete-dialog"]) if ($(dialog).open) $(dialog).close();
   sending.clear();
   signedIn = false;
   signingOut = false;
@@ -660,6 +885,7 @@ async function createConversation() {
   try {
     const result = await api("/conversations", { method: "POST", body: {} });
     if (captured.connection !== connection || !signedIn) return;
+    listGeneration += 1;
     conversations.unshift(result);
     if (current(captured)) await selectConversation(result.id, true);
   } catch (error) {
@@ -714,6 +940,7 @@ async function dispatch(pending) {
       return;
     }
     updateConversationTitle(captured.id, result.conversation_title);
+    touchConversation(captured.id, result.created_at);
     outbox.delete(captured.id);
     saveSession();
     if (!current(captured)) {
@@ -730,10 +957,16 @@ async function dispatch(pending) {
     if (outbox.get(captured.id)?.key === pending.key) {
       // A definitive input/conflict response did not accept this payload.
       // Transport failures remain unknown and retain the exact same identity.
-      pending.rejected = error instanceof ApiError && [400, 409, 413, 422].includes(error.status);
+      // A 404 means the conversation was deleted, so nothing was accepted.
+      pending.rejected = error instanceof ApiError && [400, 404, 409, 413, 422].includes(error.status);
       saveSession();
     }
     if (error.name === "AbortError") return;
+    if (error instanceof ApiError && error.status === 404 && selectedId === captured.id) {
+      showNotice(DELETED);
+      render();
+      return;
+    }
     if (error instanceof ApiError && error.status === 409) {
       // Another client may already have submitted the first message.
       if (selectedId === captured.id) await refreshCurrentConversation();
@@ -1038,7 +1271,40 @@ $("open-sidebar").addEventListener("click", () => setDrawer(true));
 $("close-sidebar").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });
 $("drawer-backdrop").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && $("sidebar").classList.contains("open")) { setDrawer(false); $("open-sidebar").focus(); }
+  if (event.key !== "Escape" || !$("sidebar").classList.contains("open")) return;
+  // Escape closes an open dialog or menu first, not the drawer behind it.
+  if (document.querySelector("dialog[open]") || $("conversation-menu").matches(":popover-open")) return;
+  setDrawer(false);
+  $("open-sidebar").focus();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && signedIn && listed) refreshConversations().catch(() => {});
+});
+$("conversation-menu").addEventListener("beforetoggle", (event) => {
+  if (event.newState === "open") placeMenu();
+});
+$("conversation-menu").addEventListener("toggle", (event) => {
+  const open = event.newState === "open";
+  // Measured again now that the menu has its real height.
+  if (open) placeMenu();
+  else if (document.activeElement === document.body) menuButton(menuFor)?.focus();
+  markMenuRow(open);
+});
+$("conversation-list").addEventListener("scroll", closeMenu, { passive: true });
+window.addEventListener("resize", closeMenu);
+$("menu-rename").addEventListener("click", () => { closeMenu(); openRename(menuFor); });
+$("menu-delete").addEventListener("click", () => { closeMenu(); openDelete(menuFor); });
+$("rename-form").addEventListener("submit", rename);
+$("rename-cancel").addEventListener("click", () => { if (!renaming) $("rename-dialog").close(); });
+$("rename-dialog").addEventListener("cancel", (event) => { if (renaming) event.preventDefault(); });
+$("rename-dialog").addEventListener("close", () => menuButton(renameTarget)?.focus());
+$("delete-confirm").addEventListener("click", confirmDelete);
+$("delete-cancel").addEventListener("click", () => { if (!deleting) $("delete-dialog").close(); });
+$("delete-dialog").addEventListener("cancel", (event) => { if (deleting) event.preventDefault(); });
+$("delete-dialog").addEventListener("close", () => {
+  // After a delete, focus moves to a neighbouring row or New Chat.
+  const target = focusAfterDelete ? rowButton(focusAfterDelete) : menuButton(deleteTarget);
+  (target ?? $("new-chat")).focus();
 });
 $("close-review").addEventListener("click", () => { if (!resolving) closeReview(); });
 $("review-dialog").addEventListener("cancel", (event) => {

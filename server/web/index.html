@@ -23,6 +23,10 @@
         <button class="text-button storage-link" id="storage-info" type="button">このタブの保存について</button>
       </div>
     </aside>
+    <div id="conversation-menu" class="conversation-menu" popover aria-label="会話の操作">
+      <button id="menu-rename" type="button" autofocus>名前を変更</button>
+      <button id="menu-delete" class="danger" type="button">削除</button>
+    </div>
     <button class="drawer-backdrop" id="drawer-backdrop" type="button" aria-label="会話一覧を閉じる" hidden></button>
     <main class="workspace">
       <header class="conversation-heading">
@@ -80,6 +84,31 @@
         <p class="form-error" id="review-error" role="alert"></p>
         <button class="primary-button" id="resolve" type="submit">確認して会話を続ける</button>
       </form>
+    </div>
+  </dialog>
+
+  <dialog id="rename-dialog" aria-labelledby="rename-title">
+    <form id="rename-form" class="dialog-content">
+      <h2 id="rename-title">会話の名前を変更</h2>
+      <label for="rename-input">名前</label>
+      <input id="rename-input" type="text" maxlength="200" autocomplete="off">
+      <p class="form-error" id="rename-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="secondary-button" id="rename-cancel" type="button">キャンセル</button>
+        <button class="primary-button" id="rename-save" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description">
+    <div class="dialog-content">
+      <h2 id="delete-title">会話を削除しますか？</h2>
+      <p id="delete-description"></p>
+      <p class="form-error" id="delete-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="secondary-button" id="delete-cancel" type="button" autofocus>キャンセル</button>
+        <button class="danger-button" id="delete-confirm" type="button">削除</button>
+      </div>
     </div>
   </dialog>
 

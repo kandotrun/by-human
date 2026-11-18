@@ -19,6 +19,7 @@
   --warning: #7a5a00;
   --warning-soft: #fdf3e4;
   --danger: #b42f3d;
+  --danger-ink: #ffffff;
   --focus: #e8590c;
   --placeholder: #6c7179;
   --disabled: #b4b8be;
@@ -53,6 +54,7 @@
     --warning: #e3c16f;
     --warning-soft: #33271a;
     --danger: #ff8a93;
+    --danger-ink: #2a0b10;
     --placeholder: #85898f;
     --disabled: #4a4d53;
     --shadow: #00000040;
@@ -73,10 +75,23 @@ button { color: inherit; }
 .wordmark { font-size: 23px; font-weight: 650; letter-spacing: -.9px; text-decoration: none; color: var(--ink); }
 .new-conversation { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; display: flex; align-items: center; gap: 10px; padding: 11px 14px; font-weight: 550; text-align: left; }
 .new-conversation span { font-size: 22px; line-height: 1; color: var(--accent); }
-.conversation-list { overflow-y: auto; flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: stretch; gap: 5px; }
-.conversation-list button { background: transparent; border: 0; border-radius: 10px; padding: 11px 12px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 46px; }
-.conversation-list button:hover { background: var(--hover); }
-.conversation-list button[aria-current="page"] { background: var(--surface); color: var(--accent); font-weight: 550; }
+.conversation-list { overflow-y: auto; flex: 1; min-height: 0; }
+.conversation-group { margin: 18px 12px 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.conversation-group:first-child { margin-top: 0; }
+.conversation-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.conversation-item { display: flex; align-items: center; border-radius: 10px; }
+.conversation-item:hover { background: var(--hover); }
+.conversation-item.current { background: var(--surface); }
+.conversation-select { flex: 1; min-width: 0; background: transparent; border: 0; border-radius: 10px; padding: 11px 4px 11px 12px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 44px; }
+.conversation-item.current .conversation-select { color: var(--accent); font-weight: 550; }
+.conversation-more { flex: 0 0 36px; height: 36px; margin-right: 4px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 18px; line-height: 1; opacity: 0; }
+.conversation-more:hover { background: var(--hover); }
+.conversation-item:hover .conversation-more, .conversation-item:focus-within .conversation-more, .conversation-item.current .conversation-more, .conversation-item.menu-open .conversation-more { opacity: 1; }
+@media (hover: none) { .conversation-more { opacity: 1; } }
+.conversation-menu { position: fixed; inset: auto; margin: 0; min-width: 168px; padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); box-shadow: 0 12px 32px #1f232826; }
+.conversation-menu button { display: block; width: 100%; padding: 9px 12px; border: 0; border-radius: 8px; background: transparent; text-align: left; font-size: 14px; }
+.conversation-menu button:hover { background: var(--hover); }
+.conversation-menu .danger { color: var(--danger); }
 .sidebar-empty { color: var(--muted); padding: 4px 12px; font-size: 13px; }
 .sidebar-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; padding: 0 10px; gap: 8px 10px; }
 .sidebar-footer .storage-link { flex-basis: 100%; text-align: left; font-size: 11px; }
@@ -165,6 +180,8 @@ textarea::placeholder, input::placeholder { color: var(--placeholder); }
 .notice .notice-action { color: inherit; font-weight: 600; text-decoration: underline; margin-left: 4px; }
 .primary-button, .secondary-button { padding: 10px 17px; border: 1px solid transparent; border-radius: 10px; min-height: 43px; font-size: 14px; }
 .primary-button { color: var(--accent-ink); background: var(--accent); }
+.danger-button { padding: 10px 17px; border: 1px solid transparent; border-radius: 10px; min-height: 43px; font-size: 14px; color: var(--danger-ink); background: var(--danger); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .secondary-button { background: var(--surface); border-color: var(--line); }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; background: transparent; border: 1px solid var(--line); border-radius: 50%; font-size: 22px; line-height: 1; flex-shrink: 0; }
 dialog { width: min(440px, calc(100% - 32px)); max-height: calc(100dvh - 36px); overflow-y: auto; border: 1px solid var(--line); border-radius: 20px; padding: 0; background: var(--surface); color: var(--ink); box-shadow: 0 20px 100px #10203c26; }
