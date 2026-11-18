@@ -192,7 +192,10 @@ async fn start_session(
     if !state.browser_origins.allows(&headers) {
         return Err(ApiError::origin_not_allowed());
     }
-    if !bool::from(input.token.as_bytes().ct_eq(state.bearer.as_bytes())) {
+    // Comparing fixed-size fingerprints keeps the timing independent of the
+    // submitted and configured token lengths.
+    let submitted = browser_session::token_fingerprint(&input.token);
+    if !bool::from(submitted[..].ct_eq(&state.token_fingerprint[..])) {
         return Err(ApiError::unauthorized());
     }
     let secret = SessionSecret::generate().ok_or_else(ApiError::session_unavailable)?;

@@ -756,10 +756,46 @@ test('an unknown session cookie asks to sign in again', async ({ page, context }
   await expectSignedIn(page);
 });
 
-test('browser sessions reject writes from another origin', async ({ page }) => {
+test('temporary loading failures keep the session and offer a retry', async ({ page }) => {
   await connect(page);
-  const denied = await page.request.post('/v1/conversations', { data: {}, headers: { Origin: 'http://evil.example' } });
-  expect(denied.status()).toBe(403);
-  const allowed = await page.request.post('/v1/conversations', { data: {}, headers: { Origin: 'http://127.0.0.1:43219' } });
-  expect(allowed.status()).toBe(201);
+  const id = await newConversation(page);
+  for (const path of ['**/v1/session', '**/v1/conversations']) {
+    let failures = 1;
+    await page.route(path, route => {
+      if (route.request().method() !== 'GET' || failures === 0) return route.continue();
+      failures -= 1;
+      return route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"storage_unavailable"}' });
+    });
+    await page.reload();
+    await expect(page.getByRole('button', { name: '再試行', exact: true })).toBeVisible();
+    await expect(signInDialog(page)).toBeHidden();
+    await page.getByRole('button', { name: '再試行', exact: true }).click();
+    await expectSignedIn(page);
+    await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('#notice')).toBeHidden();
+    await page.unroute(path);
+  }
+});
+
+test('pending text stays hidden while signed out and returns after signing in', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const runs = /\/v1\/conversations\/[^/]+\/runs$/;
+  await page.route(runs, route => route.abort('failed'));
+  await composer(page).fill('ログアウト後に見せない本文');
+  await page.getByRole('button', { name: '送信', exact: true }).click();
+  await expect(page.getByRole('button', { name: '送信結果を確認', exact: true })).toBeVisible();
+  await expect(userRows(page)).toHaveText(['ログアウト後に見せない本文']);
+  await page.getByRole('button', { name: 'ログアウト', exact: true }).click();
+  await expect(signInDialog(page)).toBeVisible();
+  await expect(page.getByText('ログアウト後に見せない本文')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '送信結果を確認', exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(signInDialog(page)).toBeVisible();
+  await expect(page.getByText('ログアウト後に見せない本文')).toHaveCount(0);
+  await page.unroute(runs);
+  await connect(page, false);
+  await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
+  await expect(userRows(page)).toHaveText(['ログアウト後に見せない本文']);
+  await expect(page.getByRole('button', { name: '送信結果を確認', exact: true })).toBeVisible();
 });

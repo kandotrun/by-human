@@ -52,9 +52,16 @@ function element(tag, className, text) {
   return node;
 }
 
-function showNotice(text = "") {
-  $("notice").textContent = text;
-  $("notice").hidden = !text;
+function showNotice(text = "", retry = null) {
+  const notice = $("notice");
+  notice.replaceChildren(text);
+  if (text && retry) {
+    const button = element("button", "text-button notice-action", "再試行");
+    button.type = "button";
+    button.addEventListener("click", retry, { once: true });
+    notice.append(" ", button);
+  }
+  notice.hidden = !text;
 }
 
 function restoreSession() {
@@ -211,7 +218,8 @@ function renderMessages(forceScroll = false) {
     if (run.reviewed_at && run.review_note) turn.append(element("p", "review-note", `確認メモ：${run.review_note}`));
     fragment.append(turn);
   }
-  const pending = outbox.get(selectedId);
+  // Unacknowledged text stays in tab storage but is shown only while signed in.
+  const pending = signedIn ? outbox.get(selectedId) : null;
   const matched = pending && runs.some((run) => matchesSubmission(run, pending));
   if (pending && !matched) {
     const turn = element("div", "turn");
@@ -237,7 +245,7 @@ function renderMessages(forceScroll = false) {
 function renderControls() {
   const busy = runs.find(active);
   const unknown = runs.find(unresolved);
-  const pending = outbox.get(selectedId);
+  const pending = signedIn ? outbox.get(selectedId) : null;
   const text = $("message").value;
   $("message").disabled = !signedIn || !currentConversation || loading;
   $("send").disabled = !signedIn || !currentConversation || loading || isSending() || Boolean(busy || unknown || pending) || !text.trim() || !storageReady;
@@ -465,11 +473,14 @@ async function resumeSession() {
     if (!response.ok) throw new ApiError(response.status);
     await openSignedIn(capturedConnection);
   } catch (error) {
+    // Only an ended session needs the token; api() already handled a 401.
+    // Transport and server failures keep the cookie and offer a retry.
     if (capturedConnection !== connection || error.name === "AbortError") return;
-    signedIn = false;
     render();
-    $("connect-error").textContent = friendlyError(error);
-    if (!$("connect-dialog").open) $("connect-dialog").showModal();
+    showNotice(friendlyError(error), () => {
+      showNotice();
+      resumeSession();
+    });
   }
 }
 

@@ -75,6 +75,7 @@ textarea::placeholder, input::placeholder { color: #8a95a5; }
 .run-actions p { margin: 0 0 7px; }
 .run-actions button { margin-right: 8px; }
 .notice { margin: 5px 30px 0; padding: 9px 13px; background: var(--warning-soft); color: var(--warning); border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
+.notice .notice-action { color: inherit; font-weight: 600; text-decoration: underline; margin-left: 4px; }
 .primary-button, .secondary-button { padding: 10px 17px; border: 1px solid transparent; border-radius: 10px; min-height: 43px; font-size: 14px; }
 .primary-button { color: #fff; background: var(--accent); }
 .secondary-button { background: var(--surface); border-color: var(--line); }

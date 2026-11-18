@@ -104,12 +104,16 @@ impl BrowserOrigins {
         if !addr.ip().is_loopback() {
             return Self::default();
         }
-        let port = addr.port();
-        let direct = match addr {
-            SocketAddr::V4(v4) => format!("http://{}:{port}", v4.ip()),
-            SocketAddr::V6(v6) => format!("http://[{}]:{port}", v6.ip()),
+        // Browsers omit the default port from an HTTP origin.
+        let port = match addr.port() {
+            80 => String::new(),
+            port => format!(":{port}"),
         };
-        Self(vec![direct, format!("http://localhost:{port}")])
+        let direct = match addr {
+            SocketAddr::V4(v4) => format!("http://{}{port}", v4.ip()),
+            SocketAddr::V6(v6) => format!("http://[{}]{port}", v6.ip()),
+        };
+        Self(vec![direct, format!("http://localhost{port}")])
     }
 
     /// True only for a single `Origin` header that exactly matches.
@@ -210,6 +214,19 @@ mod tests {
             expired_cookie().to_str().unwrap(),
             format!("{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
         );
+    }
+
+    #[test]
+    fn the_default_http_port_is_omitted_like_browsers_do() {
+        let origins = BrowserOrigins::loopback("127.0.0.1:80".parse::<SocketAddr>().unwrap());
+        let allows = |value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, HeaderValue::from_static(value));
+            origins.allows(&headers)
+        };
+        assert!(allows("http://127.0.0.1"));
+        assert!(allows("http://localhost"));
+        assert!(!allows("http://127.0.0.1:80"));
     }
 
     #[test]
