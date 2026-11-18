@@ -315,9 +315,14 @@ async function refreshConversationTitle(id, capturedConnection) {
   try {
     const result = await api("/conversations");
     if (capturedConnection !== connection || listed.title !== previousTitle) return;
-    const latest = result.conversations.find((item) => item.id === id);
-    if (!latest) return;
-    updateConversationTitle(id, latest.title);
+    let latest = result.conversations.find((item) => item.id === id);
+    if (!latest) {
+      // Locally prepended conversations can push a visible one out of the
+      // server's newest list window; its bounded snapshot still has the title.
+      latest = (await api(`/conversations/${id}/snapshot`)).conversation;
+      if (capturedConnection !== connection || listed.title !== previousTitle) return;
+    }
+    updateConversationTitle(id, latest?.title);
     renderSidebar();
     if (selectedId === id) renderControls();
   } catch {

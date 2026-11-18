@@ -676,3 +676,51 @@ test('mobile drawer works with reduced motion and Japanese input stays visible',
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
   await page.screenshot({ path: testInfo.outputPath('mobile-chat.png'), fullPage: true });
 });
+
+test('an offscreen title refresh finds a conversation outside the newest list window', async ({ page }) => {
+  const createConversation = async () => {
+    const response = await page.request.post('/v1/conversations', { headers: auth, data: {} });
+    expect(response.status()).toBe(201);
+    return (await response.json()).id;
+  };
+  const id = await createConversation();
+  for (let index = 0; index < 99; index += 1) await createConversation();
+  await connect(page);
+  await expect(page.locator('#conversation-list button')).toHaveCount(100);
+  await conversationButton(page, id).click();
+  await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
+  await expect(composer(page)).toBeEnabled();
+  const path = `/v1/conversations/${id}/runs`;
+  const winner = await page.request.post(path, {
+    headers: auth,
+    data: { message: '停止テスト', idempotency_key: 'offscreen-outside-list-window' },
+  });
+  expect(winner.status()).toBe(202);
+  const { id: runId } = await winner.json();
+  const { promise: holdConflict, resolve: releaseConflict } = Promise.withResolvers();
+  await page.route(`**${path}`, async route => {
+    const response = await route.fetch();
+    expect(response.status()).toBe(409);
+    await holdConflict;
+    await route.fulfill({ response });
+  });
+  try {
+    const sending = page.waitForRequest(request => request.url().endsWith(path));
+    await composer(page).fill('競合するメッセージ');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await sending;
+    const created = await newConversation(page);
+    // The newly created conversation pushes the older one out of the server's newest 100.
+    const listed = await page.request.get('/v1/conversations', { headers: auth });
+    expect((await listed.json()).conversations.some(item => item.id === id)).toBeFalsy();
+
+    releaseConflict();
+    await expect(conversationButton(page, id)).toHaveText('停止テスト');
+    await expect(conversationButton(page, created)).toHaveAttribute('aria-current', 'page');
+    await expect(conversationTitle(page)).toHaveText('新しい会話');
+  } finally {
+    releaseConflict();
+    await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+    await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+  }
+});
