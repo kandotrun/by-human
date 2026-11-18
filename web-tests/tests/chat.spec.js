@@ -1653,3 +1653,70 @@ test('a conversation created before an accepted send is listed below it', async 
     release();
   }
 });
+
+const searchBox = page => page.getByRole('searchbox', { name: '会話を検索', exact: true });
+
+test('search finds conversations by title and message text', async ({ page }) => {
+  await connect(page);
+  const suffix = Date.now().toString(36);
+  const titled = await createTitled(page, `検索タイトル${suffix}`);
+  const id = await newConversation(page);
+  const sent = await send(page, `本文の目印${suffix}`);
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  const listed = page.locator('#conversation-list [data-conversation-id]');
+  await searchBox(page).fill(`目印${suffix}`);
+  await expect(listed).toHaveCount(1);
+  await expect(conversationButton(page, id)).toBeVisible();
+  await expect(page.locator('#conversation-list .conversation-snippet')).toHaveText(`本文の目印${suffix}`);
+  await searchBox(page).fill(`検索タイトル${suffix}`);
+  await expect(listed).toHaveCount(1);
+  await expect(conversationButton(page, titled)).toBeVisible();
+  await expect(page.locator('#conversation-list .conversation-snippet')).toHaveCount(0);
+  await conversationButton(page, titled).click();
+  await expect(conversationTitle(page)).toHaveText(`検索タイトル${suffix}`);
+  await expect(searchBox(page)).toHaveValue(`検索タイトル${suffix}`);
+  await searchBox(page).fill(`該当なし${suffix}`);
+  await expect(page.locator('#conversation-list')).toHaveText(`「該当なし${suffix}」に一致する会話はありません`);
+  await searchBox(page).press('Escape');
+  await expect(searchBox(page)).toHaveValue('');
+  await expect(conversationButton(page, id)).toBeVisible();
+  await expect(page.locator('#conversation-list h2').first()).toHaveText('今日');
+});
+
+test('search waits for Japanese input to finish', async ({ page }) => {
+  await connect(page);
+  const requests = [];
+  page.on('request', request => { if (request.url().includes('/v1/conversations/search')) requests.push(request.url()); });
+  await searchBox(page).focus();
+  await searchBox(page).dispatchEvent('compositionstart');
+  await searchBox(page).fill('にほんご');
+  await page.waitForTimeout(600);
+  expect(requests).toHaveLength(0);
+  await searchBox(page).dispatchEvent('compositionend');
+  await expect.poll(() => requests.length).toBe(1);
+  await page.waitForTimeout(500);
+  expect(requests).toHaveLength(1);
+  expect(new URL(requests[0]).searchParams.get('q')).toBe('にほんご');
+});
+
+test('search snippets show reply text as plain text', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const marker = `検索XSS${Date.now().toString(36)}`;
+  const sent = await send(page, `<img src=x onerror="window.injected=1">${marker}`);
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  await searchBox(page).fill(marker);
+  await expect(page.locator('#conversation-list .conversation-snippet')).toContainText(`<img src=x onerror="window.injected=1">${marker}`);
+  await expect(page.locator('#conversation-list img')).toHaveCount(0);
+  expect(await page.evaluate(() => window.injected)).toBeUndefined();
+});
+
+test('the list says when older conversations exist', async ({ page }) => {
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...(await response.json()), has_more: true } });
+  });
+  await connect(page);
+  await expect(page.locator('#conversation-list .sidebar-more')).toHaveText('これより古い会話は検索で探せます。');
+});

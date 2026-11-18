@@ -16,6 +16,10 @@
         <button class="icon-button mobile-only" id="close-sidebar" type="button" aria-label="会話一覧を閉じる">×</button>
       </div>
       <button class="new-conversation" id="new-chat" type="button" disabled><span aria-hidden="true">＋</span>新しい会話</button>
+      <div class="conversation-search" role="search">
+        <label class="visually-hidden" for="conversation-query">会話を検索</label>
+        <input id="conversation-query" type="search" placeholder="会話を検索" maxlength="100" autocomplete="off" enterkeyhint="search" disabled>
+      </div>
       <nav id="conversation-list" class="conversation-list" aria-label="会話一覧"></nav>
       <div class="sidebar-footer">
         <span class="connection-state" id="connection-state">未ログイン</span>
