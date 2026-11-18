@@ -239,6 +239,8 @@ dialog::backdrop { background: #172a444d; backdrop-filter: blur(4px); }
   .dialog-content { padding: 23px; }
 }
 @media (hover: none) and (pointer: coarse) {
+  /* However little the keyboard leaves visible, the send button stays in it. */
+  .app-shell { min-height: 0; }
   .composer-caption { display: none; }
   /* iOS zooms into any focused field smaller than 16px and stays zoomed. */
   input, textarea { font-size: 16px !important; }
