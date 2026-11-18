@@ -1955,6 +1955,13 @@ test('a late search answer cannot bring back a conversation deleted elsewhere', 
   }
 });
 
+test('a desktop window shorter than the layout still scrolls to the composer', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 200 });
+  await connect(page);
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeInViewport();
+});
+
 test.describe('on a phone', () => {
   test.use({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true });
   // iOS keeps the layout viewport and shrinks only the visual viewport.

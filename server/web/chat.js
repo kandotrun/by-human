@@ -1485,13 +1485,14 @@ function fitViewport() {
   if (!visual || visual.scale > 1.01) return;
   document.documentElement.style.setProperty("--app-height", `${visual.height}px`);
   document.documentElement.classList.toggle("keyboard-open", window.innerHeight - visual.height > 120);
-  if (window.scrollY) window.scrollTo(0, 0);
+  if (touchInput.matches && window.scrollY) window.scrollTo(0, 0);
 }
 window.visualViewport?.addEventListener("resize", fitViewport);
-// The shell never needs page scrolling; iOS can still scroll it while the
-// keyboard or a dialog moves focus, which would hide the header.
+// On touch devices the shell fits the visible area and never needs page
+// scrolling; iOS can still scroll it while the keyboard or a dialog moves
+// focus, which would hide the header. A short desktop window keeps scrolling.
 window.addEventListener("scroll", () => {
-  if (window.scrollY && !(window.visualViewport?.scale > 1.01)) window.scrollTo(0, 0);
+  if (touchInput.matches && window.scrollY && !(window.visualViewport?.scale > 1.01)) window.scrollTo(0, 0);
 }, { passive: true });
 fitViewport();
 restoreSession();
