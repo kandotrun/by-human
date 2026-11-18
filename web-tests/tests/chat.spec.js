@@ -2051,4 +2051,23 @@ test.describe('on a phone', () => {
     // The list then scrolls within the visible area, not behind the keyboard.
     await expect.poll(() => page.locator('#sidebar').evaluate(node => node.getBoundingClientRect().bottom)).toBe(400);
   });
+
+  test('a search result opens from the drawer when the keyboard leaves 250px', async ({ page }) => {
+    await emulateKeyboard(page);
+    const suffix = Date.now().toString(36);
+    const title = `鍵盤の上の検索${suffix}`;
+    const id = await createTitled(page, title);
+    // Sign-in opens the newest conversation, not the one searched for.
+    await createTitled(page, `後から作った会話${suffix}`);
+    await connect(page);
+    await expect(conversationTitle(page)).toHaveText(`後から作った会話${suffix}`);
+    await page.locator('#open-sidebar').tap();
+    await searchBox(page).tap();
+    // The drawer's own controls are taller than what is left visible.
+    await page.evaluate(() => window.showKeyboard(250));
+    await searchBox(page).fill(title);
+    await expect(page.locator('#conversation-list [data-conversation-id]')).toHaveCount(1);
+    await conversationButton(page, id).tap();
+    await expect(conversationTitle(page)).toHaveText(title);
+  });
 });
