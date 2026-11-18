@@ -436,16 +436,17 @@ async function connect(event) {
   try {
     const response = await fetch("/v1/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: candidate }), cache: "no-store", redirect: "error", credentials: "same-origin", signal: connectionAbort.signal });
     if (!response.ok) throw new ApiError(response.status);
-    if (capturedConnection !== connection) return;
-    await openSignedIn(capturedConnection);
   } catch (error) {
     if (capturedConnection !== connection) return;
-    signedIn = false;
     $("connect-error").textContent = error instanceof ApiError && error.status === 401 ? "サーバートークンが正しくありません。" : friendlyError(error);
-    render();
-  } finally {
-    if (capturedConnection === connection) $("connect-submit").disabled = false;
+    $("connect-submit").disabled = false;
+    return;
   }
+  if (capturedConnection !== connection) return;
+  $("connect-submit").disabled = false;
+  $("connect-error").textContent = "";
+  // The cookie is valid now, so loading follows the same retrying path as a reload.
+  await resumeSession(true);
 }
 
 async function openSignedIn(capturedConnection) {
@@ -461,7 +462,7 @@ async function openSignedIn(capturedConnection) {
 
 // A reload resumes the browser session; only a missing or ended session asks
 // for the server token again.
-async function resumeSession() {
+async function resumeSession(afterSignIn = false) {
   const capturedConnection = connection;
   try {
     const response = await fetch("/v1/session", { cache: "no-store", redirect: "error", credentials: "same-origin", signal: connectionAbort.signal });
@@ -469,7 +470,7 @@ async function resumeSession() {
     if (response.status === 401) {
       // A retry can find the session ended after the page was signed in, so
       // reset that state and any pending text before asking for the token.
-      disconnect(signedIn ? SIGNED_OUT : "");
+      disconnect(signedIn ? SIGNED_OUT : afterSignIn ? "ログイン状態を保存できませんでした。ブラウザのCookie設定を確認してください。" : "");
       return;
     }
     if (!response.ok) throw new ApiError(response.status);
@@ -478,6 +479,7 @@ async function resumeSession() {
     // Only an ended session needs the token; api() already handled a 401.
     // Transport and server failures keep the cookie and offer a retry.
     if (capturedConnection !== connection || error.name === "AbortError") return;
+    if ($("connect-dialog").open) $("connect-dialog").close();
     render();
     showNotice(friendlyError(error), () => {
       showNotice();

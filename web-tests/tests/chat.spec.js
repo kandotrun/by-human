@@ -823,3 +823,32 @@ test('a retry that finds the session ended returns to a clean sign-in', async ({
   await expect(page.locator('#connection-state')).toHaveText('未ログイン');
   await expect(page.getByText('再試行で隠す本文')).toHaveCount(0);
 });
+
+test('a loading failure right after signing in keeps the new session', async ({ page }) => {
+  let failures = 1;
+  await page.route('**/v1/conversations', route => {
+    if (route.request().method() !== 'GET' || failures === 0) return route.continue();
+    failures -= 1;
+    return route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"storage_unavailable"}' });
+  });
+  await page.goto('/');
+  const dialog = signInDialog(page);
+  await dialog.getByLabel('サーバートークン', { exact: true }).fill(TOKEN);
+  await dialog.getByRole('button', { name: 'ログイン', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('#connection-state')).toHaveText('ログイン中');
+  await page.getByRole('button', { name: '再試行', exact: true }).click();
+  await expect(page.locator('#notice')).toBeHidden();
+  await expect(newChat(page)).toBeEnabled();
+});
+
+test('a sign-in whose cookie is not kept explains the problem', async ({ page }) => {
+  // Simulates a browser that drops the session cookie.
+  await page.route('**/v1/sessions', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"expires_at":"2026-12-18T00:00:00Z"}' }));
+  await page.goto('/');
+  const dialog = signInDialog(page);
+  await dialog.getByLabel('サーバートークン', { exact: true }).fill(TOKEN);
+  await dialog.getByRole('button', { name: 'ログイン', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('ログイン状態を保存できませんでした。ブラウザのCookie設定を確認してください。');
+  await expect(dialog).toBeVisible();
+});
