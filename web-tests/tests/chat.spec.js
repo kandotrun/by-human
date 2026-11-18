@@ -825,6 +825,9 @@ test('a retry that finds the session ended returns to a clean sign-in', async ({
 });
 
 test('a loading failure right after signing in keeps the new session', async ({ page }) => {
+  const seeded = await page.request.post('/v1/conversations', { headers: auth, data: { title: '再試行で表示する会話' } });
+  expect(seeded.status()).toBe(201);
+  const { id } = await seeded.json();
   let failures = 1;
   await page.route('**/v1/conversations', route => {
     if (route.request().method() !== 'GET' || failures === 0) return route.continue();
@@ -837,9 +840,30 @@ test('a loading failure right after signing in keeps the new session', async ({ 
   await dialog.getByRole('button', { name: 'ログイン', exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(page.locator('#connection-state')).toHaveText('ログイン中');
+  await expect(conversationButton(page, id)).toHaveCount(0);
   await page.getByRole('button', { name: '再試行', exact: true }).click();
+  await expect(conversationButton(page, id)).toBeVisible();
   await expect(page.locator('#notice')).toBeHidden();
-  await expect(newChat(page)).toBeEnabled();
+});
+
+test('the sign-in button stays disabled until the first load settles', async ({ page }) => {
+  const { promise: holdList, resolve: releaseList } = Promise.withResolvers();
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() === 'GET') await holdList;
+    await route.continue();
+  });
+  await page.goto('/');
+  const dialog = signInDialog(page);
+  await dialog.getByLabel('サーバートークン', { exact: true }).fill(TOKEN);
+  const listing = page.waitForRequest(request => request.url().endsWith('/v1/conversations') && request.method() === 'GET');
+  await dialog.getByRole('button', { name: 'ログイン', exact: true }).click();
+  // The session exists and the first list load is in progress.
+  await listing;
+  await expect(dialog.getByRole('button', { name: 'ログイン', exact: true })).toBeDisabled();
+  await expect(dialog.getByRole('alert')).toHaveText('ログインしています…');
+  releaseList();
+  await expect(dialog).toBeHidden();
+  await expectSignedIn(page);
 });
 
 test('a sign-in whose cookie is not kept explains the problem', async ({ page }) => {

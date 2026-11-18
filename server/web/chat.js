@@ -443,10 +443,13 @@ async function connect(event) {
     return;
   }
   if (capturedConnection !== connection) return;
+  // The cookie is valid now, so loading follows the same retrying path as a
+  // reload. The button stays disabled until that settles, so a second sign-in
+  // cannot supersede the first; disconnect() owns the dialog if it ends.
+  await resumeSession(true);
+  if (capturedConnection !== connection) return;
   $("connect-submit").disabled = false;
   $("connect-error").textContent = "";
-  // The cookie is valid now, so loading follows the same retrying path as a reload.
-  await resumeSession(true);
 }
 
 async function openSignedIn(capturedConnection) {
