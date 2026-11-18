@@ -1009,7 +1009,7 @@ async function createConversation() {
     // A list reload can already include it, and a send accepted meanwhile is
     // newer activity.
     if (!conversations.some((item) => item.id === result.id)) insertByActivity(result);
-    // The new conversation belongs at the full list, which a search answer
+    // The new conversation belongs in the full list, which a search answer
     // still on its way would replace.
     clearSearch();
     if (current(captured)) await selectConversation(result.id, true);
