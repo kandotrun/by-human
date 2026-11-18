@@ -958,9 +958,59 @@ test('a status pill and typing dots show what the agent is doing', async ({ page
   const streaming = await send(page, '停止テスト');
   await expect(page.locator('#run-progress')).toHaveText('応答中');
   await expect(page.locator('#chat-log .typing')).toHaveCount(0);
-  await page.getByRole('button', { name: '停止', exact: true }).click();
+  // Stop shows at once, before the server acknowledges it.
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  await page.route(`**/v1/runs/${streaming.id}/cancel`, async route => {
+    await held;
+    await route.continue();
+  });
+  try {
+    await page.getByRole('button', { name: '停止', exact: true }).click();
+    await expect(page.locator('#run-progress')).toHaveText('停止しています');
+  } finally {
+    release();
+  }
   await expect.poll(async () => (await run(page, streaming.id)).status).toBe('cancelled');
   await expect(page.locator('#run-progress')).toBeHidden();
+});
+
+test('the tool label survives an event stream reconnect', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const cursors = [];
+  let delivered;
+  await page.route(/\/v1\/runs\/[^/]+\/events$/, async route => {
+    cursors.push(route.request().headers()['last-event-id'] ?? '0');
+    if (cursors.length > 1) return route.continue();
+    // Deliver the stored events through tool.started, then end this stream.
+    const controller = new AbortController();
+    const response = await fetch(route.request().url(), { headers: auth, signal: controller.signal });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const isTool = event => /^event:\s*tool\.started$/m.test(event);
+    let buffer = '';
+    let events = [];
+    while (!events.some(isTool)) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error('the event stream ended before tool.started');
+      buffer += decoder.decode(value, { stream: true });
+      events = buffer.split(/\r?\n\r?\n/).slice(0, -1);
+    }
+    controller.abort();
+    events = events.slice(0, events.findIndex(isTool) + 1);
+    delivered = /^id:\s*(\d+)$/m.exec(events.at(-1))[1];
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: `${events.join('\n\n')}\n\n` });
+  });
+  const sent = await send(page, '復旧テスト');
+  try {
+    // The reconnect resumes after tool.started, so no new event restates it.
+    await expect.poll(() => cursors.length).toBe(2);
+    expect(cursors[1]).toBe(delivered);
+    await expect(page.locator('#run-progress')).toHaveText('ツールを実行中');
+  } finally {
+    await page.request.post(`/v1/runs/${sent.id}/cancel`, { headers: auth });
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe('uncertain');
+  }
 });
 
 test('time separators label turns and a jump button returns to the latest reply', async ({ page }) => {

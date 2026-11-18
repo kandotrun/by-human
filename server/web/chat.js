@@ -335,7 +335,7 @@ function renderControls() {
   $("send").hidden = Boolean(busy);
   $("stop").hidden = !busy;
   $("stop").disabled = !signedIn || Boolean(busy?.cancel_requested) || stopping === busy?.id;
-  $("run-progress").textContent = busy ? (busy.cancel_requested ? "停止しています" : progress || "考えています") : "";
+  $("run-progress").textContent = busy ? (busy.cancel_requested || stopping === busy.id ? "停止しています" : progress || "考えています") : "";
   $("run-progress").hidden = !busy;
   const listedTitle = conversations.find((item) => item.id === selectedId)?.title;
   $("conversation-title").textContent = currentConversation?.title ?? listedTitle ?? "会話";
@@ -807,13 +807,15 @@ async function startStream(id, captured) {
   let text = "";
   let textBytes = 0;
   let attempts = 0;
+  // A reconnect resumes after the events that set this label.
+  let label = "考えています";
   while (valid()) {
     try {
       const response = await fetch(`/v1/runs/${id}/events`, { headers: { "Last-Event-ID": String(cursor) }, cache: "no-store", redirect: "error", credentials: "same-origin", signal: controller.signal });
       if (!valid()) return;
       if (response.status === 401) { disconnect(SIGNED_OUT); return; }
       if (!response.ok || !response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream") || !response.body) throw new Error("stream");
-      progress = "考えています";
+      progress = label;
       renderControls();
       await readEvents(response.body, controller.signal, (record) => {
         if (!valid()) return;
@@ -832,14 +834,15 @@ async function startStream(id, captured) {
           text += data.delta;
           if (active(run)) {
             run.output_text = text;
-            progress = "応答中";
+            label = "応答中";
             scheduleStreamingRender(run);
           }
-        } else if (record.event === "tool.started") progress = toolLabel(data.name);
-        else if (record.event === "tool.completed") progress = "考えています";
+        } else if (record.event === "tool.started") label = toolLabel(data.name);
+        else if (record.event === "tool.completed") label = "考えています";
         else if (record.event === "run.cancel_requested") run.cancel_requested = true;
         cursor = seq;
         attempts = 0;
+        progress = label;
         renderControls();
       });
       if (!valid()) return;
