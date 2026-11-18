@@ -58,6 +58,12 @@ pub struct Conversation {
     pub(crate) title_pending: bool,
 }
 
+#[derive(Clone, Debug, FromRow, Serialize)]
+pub struct BrowserSession {
+    pub id: Uuid,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Deserialize, FromRow, Serialize)]
 pub struct Run {
     pub id: Uuid,
@@ -344,6 +350,73 @@ impl Store {
             .fetch_all(&self.pool)
             .await?,
         )
+    }
+
+    /// Stores a new browser session and prunes rows that ended a week ago.
+    pub async fn create_browser_session(
+        &self,
+        secret_hash: &[u8; 32],
+        token_hash: &[u8; 32],
+        idle_secs: i64,
+    ) -> Result<BrowserSession> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM browser_sessions WHERE expires_at < clock_timestamp() - interval '7 days' OR revoked_at < clock_timestamp() - interval '7 days'",
+        )
+        .execute(&mut *tx)
+        .await?;
+        let session = sqlx::query_as(
+            "INSERT INTO browser_sessions (id, secret_hash, server_token_hash, expires_at) VALUES ($1, $2, $3, clock_timestamp() + make_interval(secs => $4)) RETURNING id, expires_at",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&secret_hash[..])
+        .bind(&token_hash[..])
+        .bind(idle_secs as f64)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(session)
+    }
+
+    /// Returns the live session for this secret and server token. An idle
+    /// expiry is extended at most once per hour to avoid a write per request.
+    pub async fn authenticate_browser_session(
+        &self,
+        secret_hash: &[u8; 32],
+        token_hash: &[u8; 32],
+        idle_secs: i64,
+    ) -> Result<Option<BrowserSession>> {
+        Ok(sqlx::query_as(
+            "WITH live AS (
+                 SELECT id, expires_at FROM browser_sessions
+                 WHERE secret_hash = $1 AND server_token_hash = $2
+                   AND revoked_at IS NULL AND expires_at > clock_timestamp()
+             ), touched AS (
+                 UPDATE browser_sessions
+                 SET last_used_at = clock_timestamp(),
+                     expires_at = clock_timestamp() + make_interval(secs => $3)
+                 WHERE id IN (SELECT id FROM live)
+                   AND last_used_at < clock_timestamp() - interval '1 hour'
+                 RETURNING id, expires_at
+             )
+             SELECT live.id, COALESCE(touched.expires_at, live.expires_at) AS expires_at
+             FROM live LEFT JOIN touched ON touched.id = live.id",
+        )
+        .bind(&secret_hash[..])
+        .bind(&token_hash[..])
+        .bind(idle_secs as f64)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn revoke_browser_session(&self, secret_hash: &[u8; 32]) -> Result<()> {
+        sqlx::query(
+            "UPDATE browser_sessions SET revoked_at = clock_timestamp() WHERE secret_hash = $1 AND revoked_at IS NULL",
+        )
+        .bind(&secret_hash[..])
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn enqueue(&self, conversation_id: Uuid, key: &str, text: &str) -> Result<Enqueued> {

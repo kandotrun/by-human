@@ -975,3 +975,77 @@ async fn lost_lock_session_cannot_claim_new_work_before_the_monitor_notices() {
     guard.release().await.unwrap();
     f.cleanup().await;
 }
+
+#[tokio::test]
+async fn browser_sessions_expire_revoke_and_follow_the_server_token() {
+    let fixture = Fixture::new().await;
+    let store = &fixture.store;
+    let token = [7; 32];
+    let secret = [1; 32];
+    let created = store
+        .create_browser_session(&secret, &token, 3_600)
+        .await
+        .unwrap();
+    let found = store
+        .authenticate_browser_session(&secret, &token, 3_600)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.id, created.id);
+    assert_eq!(found.expires_at, created.expires_at);
+    assert!(
+        store
+            .authenticate_browser_session(&secret, &[8; 32], 3_600)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .authenticate_browser_session(&[2; 32], &token, 3_600)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Use extends an idle expiry at most once per hour.
+    sqlx::query("UPDATE browser_sessions SET last_used_at = last_used_at - interval '2 hours'")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let refreshed = store
+        .authenticate_browser_session(&secret, &token, 7_200)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(refreshed.expires_at > created.expires_at);
+    let unchanged = store
+        .authenticate_browser_session(&secret, &token, 86_400)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.expires_at, refreshed.expires_at);
+
+    store.revoke_browser_session(&secret).await.unwrap();
+    assert!(
+        store
+            .authenticate_browser_session(&secret, &token, 3_600)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let expired = [3; 32];
+    store
+        .create_browser_session(&expired, &token, -60)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .authenticate_browser_session(&expired, &token, 3_600)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fixture.cleanup().await;
+}
