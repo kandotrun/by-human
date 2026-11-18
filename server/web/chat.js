@@ -8,8 +8,14 @@ const active = (run) => run && ["queued", "running"].includes(run.status);
 const unresolved = (run) => run?.status === "uncertain" && !run.reviewed_at;
 const matchesSubmission = (run, pending) => run.id === pending.runId ||
   (run.idempotency_key === pending.key && run.input_text === pending.text);
+const SIGNED_OUT = "ログインの有効期限が切れたか、ログアウトしました。サーバートークンを入力してください。";
 
-let token = "";
+let signedIn = false;
+let signingOut = false;
+// True once this sign-in has loaded the conversation list; creating a
+// conversation earlier could be undone by a delayed list response.
+let listed = false;
+let storageWarning = "";
 let connection = 0;
 let selection = 0;
 let snapshotVersion = 0;
@@ -50,9 +56,16 @@ function element(tag, className, text) {
   return node;
 }
 
-function showNotice(text = "") {
-  $("notice").textContent = text;
-  $("notice").hidden = !text;
+function showNotice(text = "", retry = null) {
+  const notice = $("notice");
+  notice.replaceChildren(text);
+  if (text && retry) {
+    const button = element("button", "text-button notice-action", "再試行");
+    button.type = "button";
+    button.addEventListener("click", retry, { once: true });
+    notice.append(" ", button);
+  }
+  notice.hidden = !text;
 }
 
 function restoreSession() {
@@ -74,7 +87,8 @@ function restoreSession() {
   } catch {
     storageReadable = false;
     storageReady = false;
-    showNotice("このタブの送信待ちを読み込めませんでした。重複送信を防ぐため送信を止めています。ブラウザの保存設定を確認してください。");
+    storageWarning = "このタブの送信待ちを読み込めませんでした。重複送信を防ぐため送信を止めています。ブラウザの保存設定を確認してください。";
+    showNotice(storageWarning);
   }
 }
 
@@ -88,7 +102,8 @@ function saveSession() {
     return true;
   } catch {
     storageReady = false;
-    showNotice("送信待ちをこのタブに保存できません。重複送信を防ぐため、ブラウザの保存設定を確認してからもう一度操作してください。");
+    storageWarning = "送信待ちをこのタブに保存できません。重複送信を防ぐため、ブラウザの保存設定を確認してからもう一度操作してください。";
+    showNotice(storageWarning);
     return false;
   }
 }
@@ -98,7 +113,7 @@ function scope() {
 }
 
 function current(captured) {
-  return token && captured.connection === connection && captured.selection === selection && captured.id === selectedId;
+  return signedIn && captured.connection === connection && captured.selection === selection && captured.id === selectedId;
 }
 
 async function readJson(response) {
@@ -124,22 +139,25 @@ async function readJson(response) {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 }
 
+// The HttpOnly session cookie authenticates every same-origin request; the
+// page never holds the server token after signing in.
 async function api(path, options = {}) {
   const capturedConnection = connection;
-  const headers = { Authorization: `Bearer ${token}`, ...options.headers };
+  const headers = { ...options.headers };
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(`/v1${path}`, { ...options, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body), cache: "no-store", redirect: "error", credentials: "omit", signal: options.signal || connectionAbort.signal });
+  const response = await fetch(`/v1${path}`, { ...options, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body), cache: "no-store", redirect: "error", credentials: "same-origin", signal: options.signal || connectionAbort.signal });
   if (response.status === 401 && capturedConnection === connection) {
-    disconnect("トークンを確認して、もう一度接続してください。");
+    disconnect(SIGNED_OUT);
     throw new ApiError(401);
   }
   if (!response.ok) throw new ApiError(response.status);
-  return readJson(response);
+  return response.status === 204 ? null : readJson(response);
 }
 
 function friendlyError(error) {
   if (error instanceof ApiError) {
-    if (error.status === 401) return "トークンを確認して、もう一度接続してください。";
+    if (error.status === 401) return SIGNED_OUT;
+    if (error.status === 403) return "このアドレスからはログインできません。サーバーと同じアドレス（例: http://127.0.0.1:4310）で開いてください。";
     if (error.status === 409) return "会話の状態が変わりました。実行中の処理や確認待ちの内容を確認してください。";
     if (error.status === 404) return "会話または処理が見つかりません。会話を選び直してください。";
     if (error.status === 413) return "メッセージが長すぎます。短く分けて送信してください。";
@@ -156,11 +174,11 @@ function setDrawer(open) {
 }
 
 function renderSidebar() {
-  $("new-chat").disabled = !token || creating;
-  $("empty-new-chat").disabled = !token || creating;
-  $("disconnect").disabled = !token;
-  $("connection-state").textContent = token ? "接続済み" : "未接続";
-  $("connection-state").classList.toggle("connected", Boolean(token));
+  $("new-chat").disabled = !signedIn || creating || !listed;
+  $("empty-new-chat").disabled = !signedIn || creating || !listed;
+  $("disconnect").disabled = !signedIn || signingOut;
+  $("connection-state").textContent = signedIn ? "ログイン中" : "未ログイン";
+  $("connection-state").classList.toggle("connected", signedIn);
   const list = $("conversation-list");
   list.replaceChildren();
   for (const conversation of conversations) {
@@ -171,7 +189,7 @@ function renderSidebar() {
     button.addEventListener("click", () => selectConversation(conversation.id));
     list.append(button);
   }
-  if (token && !conversations.length) list.append(element("p", "sidebar-empty", "会話はまだありません"));
+  if (signedIn && !conversations.length) list.append(element("p", "sidebar-empty", "会話はまだありません"));
 }
 
 function runStatus(run) {
@@ -206,7 +224,8 @@ function renderMessages(forceScroll = false) {
     if (run.reviewed_at && run.review_note) turn.append(element("p", "review-note", `確認メモ：${run.review_note}`));
     fragment.append(turn);
   }
-  const pending = outbox.get(selectedId);
+  // Unacknowledged text stays in tab storage but is shown only while signed in.
+  const pending = signedIn ? outbox.get(selectedId) : null;
   const matched = pending && runs.some((run) => matchesSubmission(run, pending));
   if (pending && !matched) {
     const turn = element("div", "turn");
@@ -232,13 +251,13 @@ function renderMessages(forceScroll = false) {
 function renderControls() {
   const busy = runs.find(active);
   const unknown = runs.find(unresolved);
-  const pending = outbox.get(selectedId);
+  const pending = signedIn ? outbox.get(selectedId) : null;
   const text = $("message").value;
-  $("message").disabled = !token || !currentConversation || loading;
-  $("send").disabled = !token || !currentConversation || loading || isSending() || Boolean(busy || unknown || pending) || !text.trim() || !storageReady;
+  $("message").disabled = !signedIn || !currentConversation || loading;
+  $("send").disabled = !signedIn || !currentConversation || loading || isSending() || Boolean(busy || unknown || pending) || !text.trim() || !storageReady;
   $("send").hidden = Boolean(busy);
   $("stop").hidden = !busy;
-  $("stop").disabled = !token || Boolean(busy?.cancel_requested) || stopping === busy?.id;
+  $("stop").disabled = !signedIn || Boolean(busy?.cancel_requested) || stopping === busy?.id;
   $("run-progress").textContent = busy ? (busy.cancel_requested ? "停止を待っています" : progress || "応答を待っています") : "";
   const listedTitle = conversations.find((item) => item.id === selectedId)?.title;
   $("conversation-title").textContent = currentConversation?.title ?? listedTitle ?? "会話";
@@ -285,8 +304,9 @@ function cancelSelection() {
 
 async function refreshConversations(capturedConnection = connection) {
   const result = await api("/conversations");
-  if (capturedConnection !== connection || !token) return;
+  if (capturedConnection !== connection || !signedIn) return;
   conversations = result.conversations.filter((item) => UUID.test(item.id));
+  listed = true;
   renderSidebar();
 }
 
@@ -331,7 +351,7 @@ async function refreshConversationTitle(id, capturedConnection) {
 }
 
 async function selectConversation(id, focusComposer = false) {
-  if (!token || !UUID.test(id)) return;
+  if (!signedIn || !UUID.test(id)) return;
   cancelSelection();
   selectedId = id;
   currentConversation = null;
@@ -390,7 +410,9 @@ function disconnect(message = "") {
   connectionAbort = new AbortController();
   cancelSelection();
   sending.clear();
-  token = "";
+  signedIn = false;
+  signingOut = false;
+  listed = false;
   conversations = [];
   runs = [];
   olderRunsOmitted = false;
@@ -417,35 +439,91 @@ async function connect(event) {
   }
   connection += 1;
   const capturedConnection = connection;
-  token = candidate;
   $("connect-submit").disabled = true;
-  $("connect-error").textContent = "接続しています…";
+  $("connect-error").textContent = "ログインしています…";
   try {
-    await refreshConversations(capturedConnection);
-    if (capturedConnection !== connection) return;
-    $("connect-dialog").close();
-    if (storageReady) showNotice();
-    render();
-    const target = conversations.some((item) => item.id === selectedId) ? selectedId : conversations[0]?.id;
-    if (target) await selectConversation(target);
+    const response = await fetch("/v1/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: candidate }), cache: "no-store", redirect: "error", credentials: "same-origin", signal: connectionAbort.signal });
+    if (!response.ok) throw new ApiError(response.status);
   } catch (error) {
     if (capturedConnection !== connection) return;
-    token = "";
-    $("connect-error").textContent = friendlyError(error);
+    $("connect-error").textContent = error instanceof ApiError && error.status === 401 ? "サーバートークンが正しくありません。" : friendlyError(error);
+    $("connect-submit").disabled = false;
+    return;
+  }
+  if (capturedConnection !== connection) return;
+  // The cookie is valid now, so loading follows the same retrying path as a
+  // reload. The button stays disabled until that settles, so a second sign-in
+  // cannot supersede the first; disconnect() owns the dialog if it ends.
+  await resumeSession(true);
+  if (capturedConnection !== connection) return;
+  $("connect-submit").disabled = false;
+  $("connect-error").textContent = "";
+}
+
+async function openSignedIn(capturedConnection) {
+  signedIn = true;
+  await refreshConversations(capturedConnection);
+  if (capturedConnection !== connection) return;
+  if ($("connect-dialog").open) $("connect-dialog").close();
+  // A retry notice may have replaced the reason sending is disabled.
+  showNotice(storageReady ? "" : storageWarning);
+  render();
+  const target = conversations.some((item) => item.id === selectedId) ? selectedId : conversations[0]?.id;
+  if (target) await selectConversation(target);
+}
+
+// A reload resumes the browser session; only a missing or ended session asks
+// for the server token again.
+async function resumeSession(afterSignIn = false) {
+  const capturedConnection = connection;
+  try {
+    const response = await fetch("/v1/session", { cache: "no-store", redirect: "error", credentials: "same-origin", signal: connectionAbort.signal });
+    if (capturedConnection !== connection) return;
+    if (response.status === 401) {
+      // A retry can find the session ended after the page was signed in, so
+      // reset that state and any pending text before asking for the token.
+      disconnect(signedIn ? SIGNED_OUT : afterSignIn ? "ログイン状態を保存できませんでした。ブラウザのCookie設定を確認してください。" : "");
+      return;
+    }
+    if (!response.ok) throw new ApiError(response.status);
+    await openSignedIn(capturedConnection);
+  } catch (error) {
+    // Only an ended session needs the token; api() already handled a 401.
+    // Transport and server failures keep the cookie and offer a retry.
+    if (capturedConnection !== connection || error.name === "AbortError") return;
+    if ($("connect-dialog").open) $("connect-dialog").close();
     render();
-  } finally {
-    if (capturedConnection === connection) $("connect-submit").disabled = false;
+    showNotice(friendlyError(error), () => {
+      showNotice();
+      resumeSession();
+    });
+  }
+}
+
+async function signOut() {
+  if (!signedIn || signingOut) return;
+  signingOut = true;
+  renderSidebar();
+  try {
+    await api("/session", { method: "DELETE" });
+    disconnect();
+  } catch (error) {
+    // A 401 already returned to the sign-in dialog inside api().
+    if (error instanceof ApiError && error.status === 401) return;
+    signingOut = false;
+    showNotice(friendlyError(error));
+    renderSidebar();
   }
 }
 
 async function createConversation() {
-  if (!token || creating) return;
+  if (!signedIn || creating) return;
   creating = true;
   const captured = scope();
   renderSidebar();
   try {
     const result = await api("/conversations", { method: "POST", body: {} });
-    if (captured.connection !== connection || !token) return;
+    if (captured.connection !== connection || !signedIn) return;
     conversations.unshift(result);
     if (current(captured)) await selectConversation(result.id, true);
   } catch (error) {
@@ -486,7 +564,7 @@ function submit(event) {
 }
 
 async function dispatch(pending) {
-  if (!token || !selectedId || isSending() || outbox.get(selectedId) !== pending) return;
+  if (!signedIn || !selectedId || isSending() || outbox.get(selectedId) !== pending) return;
   const captured = scope();
   sending.set(captured.id, pending.key);
   const ownsSend = () => captured.connection === connection && sending.get(captured.id) === pending.key;
@@ -600,9 +678,9 @@ async function startStream(id, captured) {
   let attempts = 0;
   while (valid()) {
     try {
-      const response = await fetch(`/v1/runs/${id}/events`, { headers: { Authorization: `Bearer ${token}`, "Last-Event-ID": String(cursor) }, cache: "no-store", redirect: "error", credentials: "omit", signal: controller.signal });
+      const response = await fetch(`/v1/runs/${id}/events`, { headers: { "Last-Event-ID": String(cursor) }, cache: "no-store", redirect: "error", credentials: "same-origin", signal: controller.signal });
       if (!valid()) return;
-      if (response.status === 401) { disconnect("トークンを確認して、もう一度接続してください。"); return; }
+      if (response.status === 401) { disconnect(SIGNED_OUT); return; }
       if (!response.ok || !response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream") || !response.body) throw new Error("stream");
       progress = "応答を待っています";
       renderControls();
@@ -796,7 +874,7 @@ function secureOrigin() {
 
 $("connect-form").addEventListener("submit", connect);
 $("connect-dialog").addEventListener("cancel", (event) => event.preventDefault());
-$("disconnect").addEventListener("click", () => disconnect());
+$("disconnect").addEventListener("click", signOut);
 $("new-chat").addEventListener("click", createConversation);
 $("empty-new-chat").addEventListener("click", createConversation);
 $("composer-form").addEventListener("submit", submit);
@@ -832,5 +910,5 @@ $("storage-info").addEventListener("click", () => $("storage-dialog").showModal(
 $("close-storage").addEventListener("click", () => $("storage-dialog").close());
 restoreSession();
 render();
-$("connect-dialog").showModal();
-secureOrigin();
+if (secureOrigin()) resumeSession();
+else $("connect-dialog").showModal();

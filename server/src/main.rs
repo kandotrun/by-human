@@ -164,6 +164,14 @@ async fn serve() -> anyhow::Result<()> {
     let store = Store::connect(&config.database_url)
         .await
         .map_err(|_| anyhow::anyhow!("PostgreSQL could not be initialized"))?;
+    // A rotated server token ends browser sessions for good, even if an
+    // earlier token is restored later.
+    store
+        .revoke_browser_sessions_for_other_tokens(&by_human::browser_session::token_fingerprint(
+            &config.api_token,
+        ))
+        .await
+        .map_err(|_| anyhow::anyhow!("browser sessions could not be checked"))?;
     let shutdown = CancellationToken::new();
     // Register termination while MCP starts, so an interrupted handshake also
     // drops its owned process/connection instead of leaving an orphan.
@@ -192,7 +200,10 @@ async fn serve() -> anyhow::Result<()> {
     let runner = Runner::start(store.clone(), engine, shutdown.clone()).await?;
     let fatal = runner.fatal_token();
     let state = ApiState::new(store, config.api_token, runner.notifier())
-        .map_err(|message| anyhow::anyhow!("{message}"))?;
+        .map_err(|message| anyhow::anyhow!("{message}"))?
+        .with_browser_origins(by_human::browser_session::BrowserOrigins::loopback(
+            listening_at,
+        ));
     let http_shutdown = shutdown.clone();
     let mut http = tokio::spawn(async move {
         axum::serve(listener, api::router(state))

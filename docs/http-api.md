@@ -1,15 +1,19 @@
 # Local HTTP API
 
-The default listener is `127.0.0.1:4310`. All `/v1` routes require
-`Authorization: Bearer <BY_HUMAN_API_TOKEN>`. The server token is independent of
-the OpenAI login; it never travels to OpenAI. Responses use `Cache-Control:
-no-store`. The same server serves an embedded [browser client](web-chat.md) at
-`/`, with local CSS/JavaScript assets. This slice has no browser CORS policy,
-public TLS endpoint or device pairing UI.
+The default listener is `127.0.0.1:4310`. Every `/v1` route except
+`POST /v1/sessions` requires `Authorization: Bearer <BY_HUMAN_API_TOKEN>` or a
+browser session cookie (below). The server token is independent of the OpenAI
+login; it never travels to OpenAI. Responses use `Cache-Control: no-store`. The
+same server serves an embedded [browser client](web-chat.md) at `/`, with local
+CSS/JavaScript assets. This slice has no browser CORS policy, public TLS
+endpoint or device pairing UI.
 
 | Method | Route | Result |
 | --- | --- | --- |
 | GET | `/health` | Minimal PostgreSQL readiness; no authentication required |
+| POST | `/v1/sessions` | Exchange `{"token":"..."}` for a browser session cookie |
+| GET | `/v1/session` | Current credentials: `method` is `browser` or `bearer`, with the session's `expires_at` |
+| DELETE | `/v1/session` | End the current browser session |
 | POST | `/v1/conversations` | Create with `{}` for an automatic title or `{"title":"..."}` for an explicit title |
 | GET | `/v1/conversations` | Latest 100 conversations |
 | GET | `/v1/conversations/{id}` | Conversation, latest chat messages and public run states |
@@ -48,6 +52,32 @@ The browser snapshot includes only `conversation`, `runs` (newest first), and
 8 MiB of serialized JSON, including escaped text. Omitted history stays stored.
 Canonical context exceeding 256 completed turns or 2 MiB fails explicitly with
 `CONTEXT_LIMIT_REACHED`; compaction is not implemented yet.
+
+## Browser sessions
+
+`POST /v1/sessions` compares the submitted token with the server token in
+constant time and, on success, returns `200 {"expires_at":...}` with
+`Set-Cookie: by_human_session=<random>; Path=/; HttpOnly; SameSite=Strict;
+Max-Age=34560000`. The cookie holds 32 random bytes, not the token, and
+PostgreSQL stores only SHA-256 hashes. A wrong token returns `401` without a
+cookie.
+
+- The request must carry exactly one `Origin` that matches the page's own
+  loopback address (`http://127.0.0.1:<port>` or `http://localhost:<port>` for
+  the bound listener); anything else returns `403`.
+- A cookie-authenticated request other than `GET`/`HEAD` must carry the same
+  kind of allowed `Origin`, or it returns `403`. Bearer requests do not need one.
+- A request with an `Authorization` header is judged only as bearer; an invalid
+  bearer never falls back to the cookie. Missing, duplicate or malformed session
+  cookies return `401`.
+- A session ends 30 days after its last recorded use. Use is recorded at most
+  once per hour, so a session can end up to an hour earlier; the cookie itself
+  lasts at most 400 days. `DELETE /v1/session` returns `204` and expires the
+  cookie.
+- Each session records a fingerprint of the server token. Rotating
+  `BY_HUMAN_API_TOKEN` ends every browser session, and at start-up the server
+  revokes sessions issued under any other token, so restoring an earlier token
+  does not revive them.
 
 ## Stop and recovery
 

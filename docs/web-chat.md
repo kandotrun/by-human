@@ -4,12 +4,19 @@ The Rust server embeds a small same-origin browser client at `/`. There is no
 separate frontend server or production Node.js dependency. Start the server as
 described in the README, then open `http://127.0.0.1:4310/` on the same computer.
 
-Enter the server's `BY_HUMAN_API_TOKEN` in the connection form. This is separate
-from ChatGPT login: the browser never receives the OpenAI credentials. The token
-stays in memory and must be entered again after a page reload. It is not placed
-in a URL, cookie, localStorage or sessionStorage. Requests stay on the page's
-origin. Use HTTPS for any non-loopback access; this change does not configure a
-public endpoint, TLS, CORS, device pairing or an iPhone adapter.
+Sign in once with the server's `BY_HUMAN_API_TOKEN`. This is separate from
+ChatGPT login: the browser never receives the OpenAI credentials. The server
+exchanges the token for a browser session and the page forgets the token
+immediately; it is never placed in a URL, localStorage or sessionStorage. The
+session lives in an `HttpOnly`, `SameSite=Strict` cookie that page scripts cannot
+read, so reloads, new tabs and browser restarts stay signed in. A session ends
+about 30 days after its last use (use is recorded at most hourly), when you
+choose **ログアウト**, or for every browser when the server token is rotated, and
+a sign-in lasts at most 400 days. If loading fails while the session is valid,
+the page keeps it and offers 再試行 instead of asking for the token. Requests stay on the page's origin, and the
+server accepts browser changes only from its own loopback address. Use HTTPS for
+any non-loopback access; this change does not configure a public endpoint, TLS,
+CORS, device pairing or an iPhone adapter. See [browser sessions](http-api.md#browser-sessions).
 
 The client supports new/existing conversations, Japanese multiline input,
 streamed replies, Stop, event-stream reconnection and per-conversation drafts.
@@ -55,8 +62,10 @@ not an independent verification of external effects or a per-tool approval syste
 ## 日本語
 
 `serve`で起動したサーバーのURLをブラウザで開くと、チャット画面を使えます。
-接続に使うのは`BY_HUMAN_API_TOKEN`です。ChatGPTのパスワードやトークンを入力する
-必要はありません。サーバー用トークンは画面を閉じたり再読み込みすると失われます。
+ログインに使うのは`BY_HUMAN_API_TOKEN`です。ChatGPTのパスワードやトークンを入力する
+必要はありません。一度ログインすると、再読み込みやブラウザの再起動後もログインが続きます。
+ログイン状態はスクリプトから読めないCookieで保持し、トークン自体はブラウザに保存しません。
+最後に使ってから30日たつか、**ログアウト**するか、サーバー用トークンを変更すると終了します。
 
 **新しい会話**を開くと、名前の入力なしですぐにメッセージを書けます。
 最初のメッセージが受け付けられると、その内容をもとにタイトルが付きます。

@@ -53,17 +53,18 @@ separate random server token (32–512 ASCII bytes) as `BY_HUMAN_API_TOKEN` and 
 cargo run -p by-human -- serve
 ```
 
-The default API address is `127.0.0.1:4310`; all `/v1` routes require the server
-Bearer token. `OPENAI_API_KEY` is not required and is not silently used. API-key
+The default API address is `127.0.0.1:4310`; `/v1` routes require the server
+Bearer token or a browser session created from it (see [HTTP API](docs/http-api.md)).
+`OPENAI_API_KEY` is not required and is not silently used. API-key
 billing is an explicit opt-in with `BY_HUMAN_OPENAI_AUTH=api-key`.
 ChatGPT credentials are stored in the dedicated owner-only `~/.config/by-human`
 directory; they are never read from another application.
 
-Open `http://127.0.0.1:4310/` to use the embedded chat client. Enter the server
-token, then create or select a conversation. The browser supports streamed
-replies, Stop and explicit review of uncertain work. No separate frontend build
-or server is required. See [browser chat](docs/web-chat.md) for tab storage and
-recovery behavior.
+Open `http://127.0.0.1:4310/` to use the embedded chat client. Sign in once
+with the server token; that browser then stays signed in for 30 days after its
+last use. The browser supports streamed replies, Stop and explicit review of
+uncertain work. No separate frontend build or server is required. See
+[browser chat](docs/web-chat.md) for sign-in, tab storage and recovery behavior.
 
 同じPCのブラウザでログインした後、OpenAI認証とは別のサーバー用トークンを
 `BY_HUMAN_API_TOKEN`で渡し、`serve`を実行します。APIキーへの自動切替はありません。

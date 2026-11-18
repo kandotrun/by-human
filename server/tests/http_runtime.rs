@@ -12,6 +12,7 @@ use std::{
 use async_trait::async_trait;
 use by_human::{
     api::{ApiState, router},
+    browser_session::{BrowserOrigins, SessionSecret, token_fingerprint},
     engine::{
         Engine, EngineError, Limits, Model, ModelTurn, RuntimeEvent, RuntimeSink, ToolDefinition,
     },
@@ -213,6 +214,10 @@ struct TestApp {
 
 impl TestApp {
     async fn start(store: Store, model: Arc<dyn Model>) -> Self {
+        Self::start_with(store, model, true).await
+    }
+
+    async fn start_with(store: Store, model: Arc<dyn Model>, browser_sessions: bool) -> Self {
         let runner = Runner::start(
             store.clone(),
             Arc::new(Engine::new(model, Limits::default())),
@@ -221,8 +226,14 @@ impl TestApp {
         .await
         .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let app = router(ApiState::new(store, TOKEN.into(), runner.notifier()).unwrap());
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+        let state = ApiState::new(store, TOKEN.into(), runner.notifier()).unwrap();
+        let app = router(if browser_sessions {
+            state.with_browser_origins(BrowserOrigins::loopback(addr))
+        } else {
+            state
+        });
         let stop_http = CancellationToken::new();
         let done = stop_http.clone();
         let http = tokio::spawn(async move {
@@ -953,5 +964,202 @@ async fn lost_owner_stops_the_runner_and_requires_recovery() {
         RunStatus::Uncertain
     );
     replacement.release().await.unwrap();
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn browser_sessions_need_the_token_and_an_allowed_origin_and_can_be_ended() {
+    let db = Database::new().await;
+    let app = TestApp::start(db.store.clone(), Arc::new(HappyModel::default())).await;
+    let sessions = format!("{}/v1/sessions", app.base);
+    let login = |origin: Option<&str>, token: &str| {
+        let mut request = app.client.post(&sessions).json(&json!({"token": token}));
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        request.send()
+    };
+    assert_eq!(
+        login(None, TOKEN).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        login(Some("http://evil.example"), TOKEN)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let wrong = login(Some(&app.base), "wrong-token-with-at-least-32-bytes-0000")
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    assert!(wrong.headers().get("set-cookie").is_none());
+
+    let signed_in = login(Some(&app.base), TOKEN).await.unwrap();
+    assert_eq!(signed_in.status(), StatusCode::OK);
+    let set_cookie = signed_in.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(set_cookie.starts_with("by_human_session="));
+    assert!(set_cookie.ends_with("; Path=/; HttpOnly; SameSite=Strict; Max-Age=34560000"));
+    assert!(!set_cookie.contains(TOKEN));
+    let cookie = set_cookie.split(';').next().unwrap().to_owned();
+    let body: Value = signed_in.json().await.unwrap();
+    assert!(body["expires_at"].is_string());
+
+    let get = |path: &str, cookie: &str| {
+        app.client
+            .get(format!("{}/v1{path}", app.base))
+            .header("cookie", cookie)
+            .send()
+    };
+    let status: Value = get("/session", &cookie)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["method"], "browser");
+    assert_eq!(
+        get("/conversations", &cookie).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let create = |origin: Option<&str>| {
+        let mut request = app
+            .client
+            .post(format!("{}/v1/conversations", app.base))
+            .header("cookie", &cookie)
+            .json(&json!({}));
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        request.send()
+    };
+    assert_eq!(create(None).await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        create(Some("http://evil.example")).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        create(Some(&app.base)).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+
+    let bearer: Value = app
+        .client
+        .get(format!("{}/v1/session", app.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(bearer["method"], "bearer");
+    let invalid_bearer = app
+        .client
+        .get(format!("{}/v1/conversations", app.base))
+        .header("cookie", &cookie)
+        .bearer_auth("not-the-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_bearer.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        get("/conversations", &format!("{cookie}; {cookie}"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get("/conversations", "by_human_session=short")
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // A session issued under another server token or past its idle expiry is rejected.
+    for (token_hash, idle) in [
+        (
+            token_fingerprint("another-server-token-with-32-bytes-000"),
+            3_600,
+        ),
+        (token_fingerprint(TOKEN), -60),
+    ] {
+        let secret = SessionSecret::generate().unwrap();
+        db.store
+            .create_browser_session(&secret.hash(), &token_hash, idle)
+            .await
+            .unwrap();
+        let stale = format!("by_human_session={}", secret.encode());
+        assert_eq!(
+            get("/conversations", &stale).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    let ended = app
+        .client
+        .delete(format!("{}/v1/session", app.base))
+        .header("cookie", &cookie)
+        .header("origin", &app.base)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ended.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        ended.headers()["set-cookie"],
+        "by_human_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+    );
+    assert_eq!(
+        get("/conversations", &cookie).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    app.shutdown().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn browser_sessions_are_unavailable_without_an_allowed_origin() {
+    let db = Database::new().await;
+    let app = TestApp::start_with(db.store.clone(), Arc::new(HappyModel::default()), false).await;
+    let signed_in = app
+        .client
+        .post(format!("{}/v1/sessions", app.base))
+        .header("origin", &app.base)
+        .json(&json!({"token": TOKEN}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(signed_in.status(), StatusCode::FORBIDDEN);
+    // A cookie issued while sessions were available no longer authenticates.
+    let secret = SessionSecret::generate().unwrap();
+    db.store
+        .create_browser_session(&secret.hash(), &token_fingerprint(TOKEN), 3_600)
+        .await
+        .unwrap();
+    let read = app
+        .client
+        .get(format!("{}/v1/conversations", app.base))
+        .header("cookie", format!("by_human_session={}", secret.encode()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::UNAUTHORIZED);
+    let bearer = app
+        .client
+        .get(format!("{}/v1/conversations", app.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bearer.status(), StatusCode::OK);
+    app.shutdown().await;
     db.cleanup().await;
 }
