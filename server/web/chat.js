@@ -52,6 +52,8 @@ let renameTarget = "";
 let renaming = false;
 let deleteTarget = "";
 let deleting = false;
+// The server's last refusal, shown while this tab sees no blocking work.
+let deleteError = "";
 let focusAfterDelete = "";
 const drafts = new Map();
 const outbox = new Map();
@@ -290,6 +292,8 @@ function openRename(id) {
   const conversation = conversations.find((item) => item.id === id);
   if (!conversation) return;
   renameTarget = id;
+  // rename() compares with the opening name; the title can change meanwhile.
+  $("rename-input").defaultValue = conversation.title;
   $("rename-input").value = conversation.title;
   $("rename-error").textContent = "";
   $("rename-dialog").showModal();
@@ -307,8 +311,9 @@ async function rename(event) {
     $("rename-error").textContent = "名前を入力してください。";
     return;
   }
-  // An unchanged name would only turn off automatic titling.
-  if (title === conversation.title) return $("rename-dialog").close();
+  // An untouched name would only turn off automatic titling, or undo a title
+  // that arrived while the dialog was open.
+  if (title === $("rename-input").defaultValue) return $("rename-dialog").close();
   // A pending send's response carries the title it saw and would undo this.
   if (sending.has(id)) {
     $("rename-error").textContent = "送信が終わってから、もう一度保存してください。";
@@ -345,14 +350,22 @@ function openDelete(id) {
   const conversation = conversations.find((item) => item.id === id);
   if (!conversation) return;
   deleteTarget = id;
+  deleteError = "";
   focusAfterDelete = "";
   const local = Boolean(drafts.get(id)?.trim()) || outbox.has(id);
   $("delete-description").textContent = `「${conversation.title}」のメッセージと実行記録を完全に削除します。元に戻すことはできません。${local ? "このタブの下書きと送信待ちのメッセージも削除されます。" : ""}`;
+  renderDeleteDialog();
+  $("delete-dialog").showModal();
+}
+
+// Rendered again with the controls, so it follows sends and runs that start
+// or end while the dialog is open.
+function renderDeleteDialog() {
+  const id = deleteTarget;
   // The server refuses too; this only explains it before asking.
   const busy = sending.has(id) || (id === selectedId && runs.some((run) => active(run) || unresolved(run)));
-  $("delete-error").textContent = busy ? DELETE_BUSY : "";
-  $("delete-confirm").disabled = busy;
-  $("delete-dialog").showModal();
+  $("delete-error").textContent = busy ? DELETE_BUSY : deleteError;
+  $("delete-confirm").disabled = deleting || busy;
 }
 
 async function confirmDelete() {
@@ -369,11 +382,11 @@ async function confirmDelete() {
     if (capturedConnection !== connection) return;
     if (error instanceof ApiError && error.status === 404) return deleted(id, true);
     const busy = error instanceof ApiError && error.status === 409;
-    $("delete-error").textContent = busy ? DELETE_BUSY : friendlyError(error);
+    deleteError = busy ? DELETE_BUSY : friendlyError(error);
     if (busy && selectedId === id) refreshCurrentConversation();
   } finally {
     deleting = false;
-    if ($("delete-dialog").open) $("delete-confirm").disabled = false;
+    if ($("delete-dialog").open) renderDeleteDialog();
   }
 }
 
@@ -579,6 +592,7 @@ function renderControls() {
     inspect.addEventListener("click", () => openReview(unknown.id));
     actions.append(inspect);
   }
+  if ($("delete-dialog").open) renderDeleteDialog();
 }
 
 function render(forceScroll = false) {

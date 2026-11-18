@@ -1320,6 +1320,37 @@ test('renaming checks the name and skips an unchanged one', async ({ page }) => 
   await expect(conversationButton(page, id)).toHaveText('新しい会話');
 });
 
+test('saving an untouched name keeps a title that arrived while renaming', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const path = `/v1/conversations/${id}/runs`;
+  const { promise: holdSend, resolve: releaseSend } = Promise.withResolvers();
+  await page.route(`**${path}`, async route => {
+    await holdSend;
+    await route.continue();
+  });
+  let patches = 0;
+  page.on('request', request => { if (request.method() === 'PATCH') patches += 1; });
+  try {
+    const sending = page.waitForRequest(request => request.url().endsWith(path));
+    await composer(page).fill('自動で付く名前');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await sending;
+    await openMenu(page, id, '名前を変更');
+    const dialog = renameDialog(page);
+    await expect(dialog.getByLabel('名前', { exact: true })).toHaveValue('新しい会話');
+    releaseSend();
+    await expect(conversationButton(page, id)).toHaveText('自動で付く名前');
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(conversationButton(page, id)).toHaveText('自動で付く名前');
+    expect(patches).toBe(0);
+    expect((await conversation(page, id)).conversation.title).toBe('自動で付く名前');
+  } finally {
+    releaseSend();
+  }
+});
+
 test('deleting a conversation asks first and forgets it in this tab', async ({ page }) => {
   await connect(page);
   const keep = await newConversation(page);
@@ -1374,6 +1405,40 @@ test('a busy conversation cannot be deleted', async ({ page }) => {
   } finally {
     const { id: otherRun } = await background.json();
     for (const runId of [sent.id, otherRun]) {
+      await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+      await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+    }
+  }
+});
+
+test('the delete dialog follows work that ends or starts while it is open', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const first = await send(page, '停止テスト');
+  await expect(assistantRows(page)).toHaveText('停止操作を待っています。');
+  await openMenu(page, id, '削除');
+  const dialog = deleteDialog(page);
+  const confirm = dialog.getByRole('button', { name: '削除', exact: true });
+  const busy = '実行中の処理か、確認が必要な実行結果があるため削除できません。';
+  await expect(confirm).toBeDisabled();
+  let second;
+  try {
+    await page.request.post(`/v1/runs/${first.id}/cancel`, { headers: auth });
+    await expect(confirm).toBeEnabled();
+    await expect(dialog.getByRole('alert')).toBeEmpty();
+    // Another client starts work before this tab asks to delete.
+    const started = await page.request.post(`/v1/conversations/${id}/runs`, {
+      headers: auth,
+      data: { message: '停止テスト', idempotency_key: `delete-dialog-${Date.now()}` },
+    });
+    expect(started.status()).toBe(202);
+    second = (await started.json()).id;
+    await confirm.click();
+    await expect(dialog.getByRole('alert')).toHaveText(busy);
+    await expect(confirm).toBeDisabled();
+  } finally {
+    for (const runId of [first.id, second]) {
+      if (!runId) continue;
       await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
       await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
     }
