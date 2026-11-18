@@ -120,7 +120,7 @@ WITH hits AS (
     FROM hits h JOIN runs r ON r.id = h.run_id
 ), placed AS (
     SELECT id, run_id, from_input, text,
-        greatest(strpos(lower(text), lower($1)) - least(10, greatest(0, (121 - char_length($1)) / 2)), 1) AS start
+        greatest(strpos(lower(text), lower($1)) - 10, 1) AS start
     FROM matched
 )
 SELECT c.*, p.run_id, p.from_input, substr(p.text, p.start, 121) AS excerpt,
