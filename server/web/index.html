@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>by-human</title>
+  <link rel="stylesheet" href="/chat.css">
+  <script type="module" src="/chat.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="サイドバー">
+      <div class="sidebar-heading">
+        <a class="wordmark" href="/" aria-label="by-human ホーム">by-human</a>
+        <button class="icon-button mobile-only" id="close-sidebar" type="button" aria-label="会話一覧を閉じる">×</button>
+      </div>
+      <button class="new-conversation" id="new-chat" type="button" disabled><span aria-hidden="true">＋</span>新しい会話</button>
+      <nav id="conversation-list" class="conversation-list" aria-label="会話一覧"></nav>
+      <div class="sidebar-footer">
+        <span class="connection-state" id="connection-state">未接続</span>
+        <button class="text-button" id="disconnect" type="button" disabled>切断</button>
+      </div>
+    </aside>
+    <button class="drawer-backdrop" id="drawer-backdrop" type="button" aria-label="会話一覧を閉じる" hidden></button>
+    <main class="workspace">
+      <header class="conversation-heading">
+        <button class="icon-button mobile-only" id="open-sidebar" type="button" aria-label="会話一覧を開く" aria-expanded="false" aria-controls="sidebar">☰</button>
+        <h1 id="conversation-title">会話</h1>
+        <span id="run-progress" class="run-progress" role="status" aria-live="polite"></span>
+      </header>
+      <div class="notice" id="notice" role="status" hidden></div>
+      <section class="message-area" id="message-area">
+        <div class="empty-state" id="empty-state">
+          <h2>何から始めますか？</h2>
+          <p>新しい会話を作成して、メッセージを送ってください。</p>
+          <button class="secondary-button" id="empty-new-chat" type="button" disabled>新しい会話を作成</button>
+        </div>
+        <div class="chat-log" id="chat-log" role="log" aria-label="会話のメッセージ" aria-live="off"></div>
+      </section>
+      <div class="composer-region">
+        <div id="run-actions" class="run-actions"></div>
+        <form id="composer-form" class="composer">
+          <label class="visually-hidden" for="message">メッセージ</label>
+          <textarea id="message" name="message" rows="1" placeholder="メッセージを入力" autocomplete="off" disabled></textarea>
+          <button id="send" class="send-button" type="submit" aria-label="送信" disabled><span aria-hidden="true">↑</span></button>
+          <button id="stop" class="stop-button" type="button" hidden>停止</button>
+        </form>
+        <div class="composer-caption"><span>Enterで送信 · Shift＋Enterで改行</span><button class="text-button" id="storage-info" type="button">このタブの保存について</button></div>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="connect-dialog" aria-labelledby="connect-title">
+    <form id="connect-form" class="dialog-content">
+      <h2 id="connect-title">by-human に接続</h2>
+      <p>このサーバーのトークンを入力してください。</p>
+      <label for="server-token">サーバートークン</label>
+      <input id="server-token" type="password" name="token" autocomplete="off" spellcheck="false" required minlength="32" maxlength="512">
+      <p class="field-note">トークンは保存しません。ページを開き直したときは再入力が必要です。</p>
+      <p class="form-error" id="connect-error" role="alert"></p>
+      <button class="primary-button" id="connect-submit" type="submit">接続</button>
+    </form>
+  </dialog>
+
+  <dialog id="new-dialog" aria-labelledby="new-title">
+    <form id="new-form" class="dialog-content">
+      <h2 id="new-title">新しい会話</h2>
+      <label for="new-conversation-title">会話の名前</label>
+      <input id="new-conversation-title" name="title" type="text" maxlength="200" placeholder="例：今週の予定" required>
+      <p class="form-error" id="new-error" role="alert"></p>
+      <div class="dialog-actions"><button id="cancel-new" class="secondary-button" type="button">キャンセル</button><button id="create-conversation" class="primary-button" type="submit">作成</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="review-dialog" class="review-dialog" aria-labelledby="review-title">
+    <div class="dialog-content">
+      <div class="dialog-heading"><h2 id="review-title">実行結果の確認</h2><button class="icon-button" id="close-review" type="button" aria-label="確認画面を閉じる">×</button></div>
+      <p>処理の結果を確認できませんでした。実行記録と必要に応じて接続先を確認してください。この操作で処理を再実行することはありません。</p>
+      <div id="review-records" class="review-records"></div>
+      <form id="review-form">
+        <label for="review-note">確認メモ</label>
+        <textarea id="review-note" rows="3" maxlength="4096" placeholder="実行先で確認したことや、結果が分からないことを記録" required></textarea>
+        <label class="checkbox-label"><input id="review-acknowledgment" type="checkbox" required><span>実行記録を確認しました。この処理は再実行しません。</span></label>
+        <p class="form-error" id="review-error" role="alert"></p>
+        <button class="primary-button" id="resolve" type="submit">確認して会話を続ける</button>
+      </form>
+    </div>
+  </dialog>
+
+  <dialog id="storage-dialog" aria-labelledby="storage-title">
+    <div class="dialog-content">
+      <h2 id="storage-title">このタブの保存について</h2>
+      <p>下書きと送信待ちのメッセージは、このブラウザのタブ内に保存します。ページを開き直しても、同じメッセージを重複して送らずに確認できます。</p>
+      <p>サーバートークンと受信した会話履歴はブラウザに保存しません。共有の端末では、利用後にタブを閉じてください。</p>
+      <button id="close-storage" class="primary-button" type="button">閉じる</button>
+    </div>
+  </dialog>
+</body>
+</html>

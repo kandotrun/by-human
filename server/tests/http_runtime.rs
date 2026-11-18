@@ -576,6 +576,284 @@ async fn startup_recovers_unknown_without_replay_and_resumes_queued_work() {
 }
 
 #[tokio::test]
+async fn explicit_authenticated_review_retains_receipts_and_allows_new_work() {
+    let db = Database::new().await;
+    let conversation = db
+        .store
+        .create_conversation("review through API")
+        .await
+        .unwrap();
+    let original = db
+        .store
+        .enqueue(
+            conversation.id,
+            "original-key",
+            "historical external operation",
+        )
+        .await
+        .unwrap()
+        .run;
+    let owner = db.store.acquire_owner().await.unwrap();
+    db.store
+        .claim_next(owner.owner_id())
+        .await
+        .unwrap()
+        .unwrap();
+    db.store
+        .before_tool(
+            original.id,
+            owner.owner_id(),
+            "read",
+            "lookup",
+            json!({"synthetic_private_argument":"retained"}),
+        )
+        .await
+        .unwrap();
+    db.store
+        .after_tool(
+            original.id,
+            owner.owner_id(),
+            "read",
+            "synthetic_private_receipt",
+        )
+        .await
+        .unwrap();
+    db.store
+        .before_tool(
+            original.id,
+            owner.owner_id(),
+            "write",
+            "external_operation",
+            json!({"effect":"unconfirmed"}),
+        )
+        .await
+        .unwrap();
+    owner.release().await.unwrap();
+    let model = Arc::new(HappyModel::default());
+    let app = TestApp::start(db.store.clone(), model.clone()).await;
+    // The credential-free shell is public; all conversation/review data still
+    // requires the server bearer. No separate application server is needed.
+    let shell = app
+        .client
+        .get(format!("{}/", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(shell.status(), StatusCode::OK);
+    assert_eq!(shell.headers()["content-type"], "text/html; charset=utf-8");
+    assert_eq!(shell.headers()["cache-control"], "no-store");
+    assert_eq!(shell.headers()["x-content-type-options"], "nosniff");
+    let csp = shell.headers()["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains("default-src 'none'"));
+    assert!(csp.contains("script-src 'self'"));
+    assert!(csp.contains("connect-src 'self'"));
+    assert!(!csp.contains("unsafe-inline"));
+    assert!(!shell.text().await.unwrap().contains(TOKEN));
+    let script = app
+        .client
+        .get(format!("{}/chat.js", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(script.status(), StatusCode::OK);
+    assert_eq!(
+        script.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    assert_eq!(script.headers()["cache-control"], "no-store");
+    assert_eq!(script.headers()["x-content-type-options"], "nosniff");
+    let uncertain = db.store.get_run(original.id).await.unwrap();
+    assert_eq!(uncertain.status, RunStatus::Uncertain);
+    let review_url = format!("{}/v1/runs/{}/review", app.base, original.id);
+    let resolve_url = format!("{}/v1/runs/{}/resolve", app.base, original.id);
+    assert_eq!(
+        app.client.get(&review_url).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(app.client.post(&resolve_url).json(&json!({"note":"review", "expected_event_seq":uncertain.event_seq,"acknowledge_unknown":true})).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let review: Value = app
+        .client
+        .get(&review_url)
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(review["run"]["status"], "uncertain");
+    assert_eq!(review["run"]["idempotency_key"], "original-key");
+    assert_eq!(review["tools"].as_array().unwrap().len(), 2);
+    assert_eq!(review["tools"][0]["output"], "synthetic_private_receipt");
+    assert_eq!(review["tools"][1]["status"], "uncertain");
+    let history_url = format!("{}/v1/conversations/{}", app.base, conversation.id);
+    let history = app
+        .client
+        .get(&history_url)
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!history.contains("synthetic_private_argument"));
+    assert!(!history.contains("synthetic_private_receipt"));
+    assert_eq!(
+        app.send(conversation.id, "new work", "next-key")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    for body in [
+        json!({"note":"review", "expected_event_seq":uncertain.event_seq,"acknowledge_unknown":false}),
+        json!({"note":" ", "expected_event_seq":uncertain.event_seq,"acknowledge_unknown":true}),
+        json!({"note":"x".repeat(4097), "expected_event_seq":uncertain.event_seq,"acknowledge_unknown":true}),
+        json!({"note":"review", "expected_event_seq":-1,"acknowledge_unknown":true}),
+    ] {
+        assert_eq!(
+            app.client
+                .post(&resolve_url)
+                .bearer_auth(TOKEN)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for body in [
+        json!({"note":"review", "expected_event_seq":uncertain.event_seq}),
+        json!({"note":"review", "expected_event_seq":uncertain.event_seq,"acknowledge_unknown":true,"extra":true}),
+    ] {
+        assert_eq!(
+            app.client
+                .post(&resolve_url)
+                .bearer_auth(TOKEN)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let stale = json!({"note":"review", "expected_event_seq":uncertain.event_seq-1,"acknowledge_unknown":true});
+    assert_eq!(
+        app.client
+            .post(&resolve_url)
+            .bearer_auth(TOKEN)
+            .json(&stale)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let note = "外部の結果は確認できていません。前の操作は繰り返さず、新しい相談を続けます。";
+    let body =
+        json!({"note":note, "expected_event_seq":uncertain.event_seq,"acknowledge_unknown":true});
+    let reviewed: Value = app
+        .client
+        .post(&resolve_url)
+        .bearer_auth(TOKEN)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reviewed["run"]["status"], "uncertain");
+    assert!(reviewed["run"]["reviewed_at"].is_string());
+    assert_eq!(reviewed["run"]["review_note"], note);
+    let replay: Value = app
+        .client
+        .post(&resolve_url)
+        .bearer_auth(TOKEN)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay, reviewed);
+    let different = json!({"note":"different note", "expected_event_seq":uncertain.event_seq,"acknowledge_unknown":true});
+    assert_eq!(
+        app.client
+            .post(&resolve_url)
+            .bearer_auth(TOKEN)
+            .json(&different)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let duplicate: Value = app
+        .send(
+            conversation.id,
+            "historical external operation",
+            "original-key",
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(duplicate["id"], original.id.to_string());
+    assert_eq!(duplicate["status"], "uncertain");
+    let next: Value = app
+        .send(conversation.id, "new work", "next-key")
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let next_id = next["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        terminal(&db.store, next_id).await.status,
+        RunStatus::Completed
+    );
+    assert_eq!(model.calls.load(Ordering::SeqCst), 2);
+    let input = serde_json::to_string(&model.inputs.lock().unwrap()[0]).unwrap();
+    assert!(input.contains(note));
+    assert!(input.contains("do not repeat its external operations"));
+    assert!(!input.contains("synthetic_private_receipt"));
+    assert!(!input.contains("synthetic_private_argument"));
+    assert_eq!(
+        serde_json::to_value(db.store.list_tools(original.id).await.unwrap()).unwrap(),
+        review["tools"]
+    );
+    let event_body = app
+        .client
+        .get(format!("{}/v1/runs/{}/events", app.base, original.id))
+        .bearer_auth(TOKEN)
+        .header("Last-Event-ID", uncertain.event_seq.to_string())
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(event_body.contains("event: run.reviewed"));
+    assert!(!event_body.contains(note));
+    assert!(!event_body.contains("synthetic_private_receipt"));
+    app.shutdown().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn shutdown_records_uncertainty_before_releasing_the_owner() {
     let db = Database::new().await;
     let model = Arc::new(UnresponsiveModel::default());

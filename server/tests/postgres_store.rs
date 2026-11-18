@@ -397,6 +397,262 @@ async fn canonical_context_preserves_openai_items_and_excludes_future_or_cancell
 }
 
 #[tokio::test]
+async fn owner_review_releases_new_work_without_changing_or_replaying_unknown_effects() {
+    let f = Fixture::new().await;
+    let owner = f.store.acquire_owner().await.unwrap();
+    let owner_id = owner.owner_id();
+    let conversation = f.store.create_conversation("review outcome").await.unwrap();
+    let run = f
+        .store
+        .enqueue(conversation.id, "original", "perform external work")
+        .await
+        .unwrap()
+        .run;
+    f.store.claim_next(owner_id).await.unwrap().unwrap();
+    f.store
+        .before_tool(
+            run.id,
+            owner_id,
+            "known",
+            "read_only",
+            json!({"private":"synthetic-arguments"}),
+        )
+        .await
+        .unwrap();
+    f.store
+        .after_tool(run.id, owner_id, "known", "synthetic-receipt")
+        .await
+        .unwrap();
+    f.store
+        .before_tool(
+            run.id,
+            owner_id,
+            "unknown",
+            "external_write",
+            json!({"effect":"unknown"}),
+        )
+        .await
+        .unwrap();
+    let partial = vec![
+        json!({"type":"function_call","call_id":"unknown","name":"external_write","arguments":"{}"}),
+    ];
+    let uncertain = f
+        .store
+        .finish(run.id, owner_id, completed(partial.clone(), "partial text"))
+        .await
+        .unwrap();
+    assert_eq!(uncertain.status, RunStatus::Uncertain);
+    assert!(matches!(
+        f.store.enqueue(conversation.id, "next", "new work").await,
+        Err(StoreError::Conflict(_))
+    ));
+    let tools_before = serde_json::to_value(f.store.list_tools(run.id).await.unwrap()).unwrap();
+    let note = "外部サービスを確認しました。前の操作は繰り返さず、別の作業を続けます。";
+    let reviewed = f
+        .store
+        .resolve_uncertain(run.id, uncertain.event_seq, note)
+        .await
+        .unwrap();
+    assert_eq!(reviewed.status, RunStatus::Uncertain);
+    assert_eq!(reviewed.error_code, uncertain.error_code);
+    assert_eq!(reviewed.output_text, uncertain.output_text);
+    assert_eq!(reviewed.output_items, json!(partial));
+    assert!(reviewed.reviewed_at.is_some());
+    assert_eq!(reviewed.review_note.as_deref(), Some(note));
+    assert_eq!(reviewed.reviewed_event_seq, Some(uncertain.event_seq));
+    assert_eq!(reviewed.event_seq, uncertain.event_seq + 1);
+    assert_eq!(
+        serde_json::to_value(f.store.list_tools(run.id).await.unwrap()).unwrap(),
+        tools_before
+    );
+    assert_eq!(
+        f.store
+            .list_events(run.id, uncertain.event_seq, 100)
+            .await
+            .unwrap()[0]
+            .kind,
+        "run.reviewed"
+    );
+    let repeat = f
+        .store
+        .resolve_uncertain(run.id, uncertain.event_seq, note)
+        .await
+        .unwrap();
+    assert_eq!(repeat.reviewed_at, reviewed.reviewed_at);
+    assert_eq!(repeat.event_seq, reviewed.event_seq);
+    let original_retry = f
+        .store
+        .enqueue(conversation.id, "original", "perform external work")
+        .await
+        .unwrap();
+    assert!(!original_retry.created);
+    assert_eq!(original_retry.run.id, run.id);
+    assert_eq!(original_retry.run.status, RunStatus::Uncertain);
+    let next = f
+        .store
+        .enqueue(conversation.id, "next", "new work")
+        .await
+        .unwrap()
+        .run;
+    let context = f.store.context_for(next.id).await.unwrap();
+    assert_eq!(context.len(), 2);
+    assert_eq!(context[0]["role"], "user");
+    let history = context[0]["content"][0]["text"].as_str().unwrap();
+    assert!(history.contains("perform external work"));
+    assert!(history.contains(note));
+    assert!(history.contains("do not repeat its external operations"));
+    assert!(!history.contains("synthetic-receipt"));
+    assert!(!history.contains("synthetic-arguments"));
+    assert!(!history.contains("function_call"));
+    assert_eq!(
+        f.store.claim_next(owner_id).await.unwrap().unwrap().id,
+        next.id
+    );
+    assert_eq!(f.store.list_tools(run.id).await.unwrap().len(), 2);
+    owner.release().await.unwrap();
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn outcome_review_is_fenced_idempotent_and_serialized_with_enqueue() {
+    let f = Fixture::new().await;
+    let owner = f.store.acquire_owner().await.unwrap();
+    let conversation = f.store.create_conversation("review races").await.unwrap();
+    let run = f
+        .store
+        .enqueue(conversation.id, "original", "unknown work")
+        .await
+        .unwrap()
+        .run;
+    assert!(matches!(
+        f.store
+            .resolve_uncertain(run.id, run.event_seq, "review")
+            .await,
+        Err(StoreError::Conflict(_))
+    ));
+    f.store.claim_next(owner.owner_id()).await.unwrap().unwrap();
+    assert!(matches!(
+        f.store
+            .resolve_uncertain(run.id, run.event_seq, "review")
+            .await,
+        Err(StoreError::Conflict(_))
+    ));
+    let uncertain = f
+        .store
+        .finish(
+            run.id,
+            owner.owner_id(),
+            RunCompletion {
+                status: RunStatus::Uncertain,
+                output_items: vec![],
+                output_text: String::new(),
+                error_code: Some("INTERRUPTED".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        f.store
+            .resolve_uncertain(run.id, uncertain.event_seq - 1, "review")
+            .await,
+        Err(StoreError::Conflict(_))
+    ));
+    for note in ["", "  ", "\0", &"x".repeat(4097)] {
+        assert!(matches!(
+            f.store
+                .resolve_uncertain(run.id, uncertain.event_seq, note)
+                .await,
+            Err(StoreError::InvalidInput(_))
+        ));
+    }
+    let (a, b, racing_enqueue) = tokio::join!(
+        f.store
+            .resolve_uncertain(run.id, uncertain.event_seq, "review A"),
+        f.store
+            .resolve_uncertain(run.id, uncertain.event_seq, "review A"),
+        f.store.enqueue(conversation.id, "next", "new work"),
+    );
+    assert_eq!(a.unwrap().event_seq, b.unwrap().event_seq);
+    if let Err(error) = racing_enqueue {
+        assert!(matches!(error, StoreError::Conflict(_)));
+    }
+    let next = f
+        .store
+        .enqueue(conversation.id, "next", "new work")
+        .await
+        .unwrap()
+        .run;
+    assert_ne!(next.id, run.id);
+    assert_eq!(
+        f.store.list_runs(conversation.id, 100).await.unwrap().len(),
+        2
+    );
+    assert!(matches!(
+        f.store
+            .resolve_uncertain(run.id, uncertain.event_seq, "review B")
+            .await,
+        Err(StoreError::Conflict(_))
+    ));
+    assert!(matches!(
+        f.store
+            .resolve_uncertain(run.id, uncertain.event_seq + 1, "review A")
+            .await,
+        Err(StoreError::Conflict(_))
+    ));
+    assert_eq!(
+        f.store
+            .get_run(run.id)
+            .await
+            .unwrap()
+            .review_note
+            .as_deref(),
+        Some("review A")
+    );
+    owner.release().await.unwrap();
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn reviewed_history_counts_escaped_notes_and_does_not_load_partial_tool_items() {
+    let f = Fixture::new().await;
+    let conversation = f
+        .store
+        .create_conversation("reviewed context")
+        .await
+        .unwrap();
+    // The huge partial output is deliberately excluded. Only completed output
+    // and the owner's bounded review note can enter the next provider context.
+    sqlx::query("INSERT INTO runs (id, conversation_id, idempotency_key, input_text, status, output_items, reviewed_at, review_note, reviewed_event_seq) VALUES ($1, $2, 'partial', 'historical request', 'uncertain', $3, clock_timestamp(), 'reviewed without retry', 1)")
+        .bind(Uuid::new_v4()).bind(conversation.id).bind(json!([{"type":"reasoning","text":"z".repeat(2_097_152)}])).execute(&f.pool).await.unwrap();
+    let target = f
+        .store
+        .enqueue(conversation.id, "next", "continue")
+        .await
+        .unwrap()
+        .run;
+    let context = f.store.context_for(target.id).await.unwrap();
+    assert!(serde_json::to_vec(&context).unwrap().len() < 1024);
+    f.store.request_cancel(target.id).await.unwrap();
+    // Quoted notes and inputs fit their own limits, but exceed the provider's
+    // serialized 2 MiB budget together. Neither may bypass preflight accounting.
+    sqlx::query("INSERT INTO runs (id, conversation_id, idempotency_key, input_text, status, reviewed_at, review_note, reviewed_event_seq) SELECT gen_random_uuid(), $1, 'reviewed-' || n, $2, 'uncertain', clock_timestamp(), $3, 1 FROM generate_series(1, 40) n")
+        .bind(conversation.id).bind("\"".repeat(24*1024)).bind("\"".repeat(4096)).execute(&f.pool).await.unwrap();
+    let target = f
+        .store
+        .enqueue(conversation.id, "last", "continue")
+        .await
+        .unwrap()
+        .run;
+    assert!(matches!(
+        f.store.context_for(target.id).await,
+        Err(StoreError::InvalidInput(
+            "conversation context requires compaction"
+        ))
+    ));
+    f.cleanup().await;
+}
+
+#[tokio::test]
 async fn event_sequences_are_monotonic_under_concurrent_writers_and_replay() {
     let f = Fixture::new().await;
     let owner = f.store.acquire_owner().await.unwrap();

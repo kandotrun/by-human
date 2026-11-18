@@ -57,10 +57,13 @@ pub fn router(state: ApiState) -> Router {
         .route("/conversations/{id}/runs", post(enqueue))
         .route("/runs/{id}", get(get_run))
         .route("/runs/{id}/cancel", post(cancel_run))
+        .route("/runs/{id}/review", get(review_run))
+        .route("/runs/{id}/resolve", post(resolve_run))
         .route("/runs/{id}/events", get(events))
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(state.clone(), authenticate));
     Router::new()
+        .merge(crate::web::router())
         .route("/health", get(health))
         .nest("/v1", authenticated)
         .layer(DefaultBodyLimit::max(32 * 1024))
@@ -196,6 +199,39 @@ async fn cancel_run(
     Ok(Json(json!({"run": public_run(&run)})))
 }
 
+async fn review_run(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let run = state.store.get_run(id).await?;
+    let tools = state.store.list_tools(id).await?;
+    Ok(Json(json!({"run": public_run(&run), "tools": tools})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutcomeReview {
+    note: String,
+    expected_event_seq: i64,
+    acknowledge_unknown: bool,
+}
+
+async fn resolve_run(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<OutcomeReview>,
+) -> Result<Json<Value>, ApiError> {
+    nonempty(&input.note, 4096)?;
+    if !input.acknowledge_unknown || input.expected_event_seq < 0 {
+        return Err(ApiError::bad_request("invalid_outcome_review"));
+    }
+    let run = state
+        .store
+        .resolve_uncertain(id, input.expected_event_seq, &input.note)
+        .await?;
+    Ok(Json(json!({"run": public_run(&run)})))
+}
+
 async fn events(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,
@@ -275,10 +311,12 @@ fn nonempty(value: &str, max_bytes: usize) -> Result<(), ApiError> {
 fn public_run(run: &Run) -> Value {
     json!({
         "id":run.id,"conversation_id":run.conversation_id,"status":run.status,
+        "idempotency_key":run.idempotency_key,
         "input_text":run.input_text,"output_text":run.output_text,
         "cancel_requested":run.cancel_requested,"error_code":run.error_code,
         "event_seq":run.event_seq,"created_at":run.created_at,
         "started_at":run.started_at,"finished_at":run.finished_at,
+        "reviewed_at":run.reviewed_at,"review_note":run.review_note,
     })
 }
 

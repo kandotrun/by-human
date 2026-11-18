@@ -69,6 +69,9 @@ pub struct Run {
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub review_note: Option<String>,
+    pub reviewed_event_seq: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -367,7 +370,7 @@ impl Store {
                 created: false,
             });
         }
-        let unfinished: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runs WHERE conversation_id = $1 AND status IN ('queued', 'running', 'uncertain'))")
+        let unfinished: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runs WHERE conversation_id = $1 AND (status IN ('queued', 'running') OR (status = 'uncertain' AND reviewed_at IS NULL)))")
             .bind(conversation_id).fetch_one(&mut *tx).await?;
         if unfinished {
             return Err(StoreError::Conflict(
@@ -388,6 +391,67 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?
             .ok_or(StoreError::NotFound)
+    }
+
+    /// Acknowledge an unknown outcome without changing it or replaying work.
+    /// The caller must have inspected this run and explicitly accepted that
+    /// external effects may already have happened. Notes are owner input, never
+    /// a tool receipt or a claim that execution completed.
+    pub async fn resolve_uncertain(
+        &self,
+        id: Uuid,
+        expected_event_seq: i64,
+        note: &str,
+    ) -> Result<Run> {
+        if expected_event_seq < 0
+            || note.trim().is_empty()
+            || note.len() > 4096
+            || note.contains('\0')
+        {
+            return Err(StoreError::InvalidInput("invalid outcome review"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let conversation_id: Uuid =
+            sqlx::query_scalar("SELECT conversation_id FROM runs WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(StoreError::NotFound)?;
+        // Match enqueue's lock order, so new work cannot race the review's
+        // durable note and its release of the conversation reservation.
+        sqlx::query("SELECT id FROM conversations WHERE id = $1 FOR UPDATE")
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await?;
+        let run = lock_run(&mut tx, id).await?;
+        if run.status != RunStatus::Uncertain {
+            return Err(StoreError::Conflict("only uncertain work can be reviewed"));
+        }
+        if run.reviewed_at.is_some() {
+            if run.reviewed_event_seq == Some(expected_event_seq)
+                && run.review_note.as_deref() == Some(note)
+            {
+                return Ok(run);
+            }
+            return Err(StoreError::Conflict("outcome review already recorded"));
+        }
+        if run.event_seq != expected_event_seq {
+            return Err(StoreError::Conflict("outcome review is stale"));
+        }
+        sqlx::query("UPDATE runs SET reviewed_at = clock_timestamp(), review_note = $2, reviewed_event_seq = $3 WHERE id = $1")
+            .bind(id).bind(note).bind(expected_event_seq).execute(&mut *tx).await?;
+        // Public events carry no tool payloads or owner note. Explicit review
+        // inspection and the public run view expose the separate note.
+        append_system_event(
+            &mut tx,
+            id,
+            "run.reviewed",
+            json!({"status": "uncertain", "reviewed": true}),
+        )
+        .await?;
+        let result = fetch_run_tx(&mut tx, id).await?;
+        tx.commit().await?;
+        Ok(result)
     }
 
     pub async fn list_runs(&self, conversation_id: Uuid, limit: i64) -> Result<Vec<Run>> {
@@ -660,22 +724,38 @@ impl Store {
         // explicitly instead of loading unlimited JSON or silently dropping a
         // tool call, receipt, or reasoning item from the model's history.
         let (turns, bytes): (i64, i64) = sqlx::query_as(
-            "SELECT count(*), COALESCE(sum(octet_length(to_jsonb(input_text)::text) + octet_length(output_items::text)), 0)::bigint FROM (SELECT input_text, output_items FROM runs WHERE conversation_id = $1 AND ordinal < $2 AND status = 'completed' ORDER BY ordinal DESC LIMIT 257) recent"
+            "SELECT count(*), COALESCE(sum(octet_length(to_jsonb(input_text)::text) + octet_length(CASE WHEN status = 'completed' THEN output_items::text ELSE to_jsonb(review_note)::text END)), 0)::bigint FROM (SELECT input_text, output_items, status, review_note FROM runs WHERE conversation_id = $1 AND ordinal < $2 AND (status = 'completed' OR (status = 'uncertain' AND reviewed_at IS NOT NULL)) ORDER BY ordinal DESC LIMIT 257) recent"
         ).bind(target.conversation_id).bind(target.ordinal).fetch_one(&self.pool).await?;
         if turns > 256 || bytes + serialized_size(&target.input_text)? as i64 > 2_097_152 {
             return Err(StoreError::InvalidInput(
                 "conversation context requires compaction",
             ));
         }
-        let prior: Vec<Run> = sqlx::query_as("SELECT * FROM runs WHERE conversation_id = $1 AND ordinal < $2 AND status = 'completed' ORDER BY ordinal")
+        #[derive(FromRow)]
+        struct ContextTurn {
+            input_text: String,
+            output_items: Option<Value>,
+            review_note: Option<String>,
+        }
+        // Do not load an interrupted run's potentially large partial canonical
+        // items. They remain inspectable in storage but cannot enter the next
+        // provider turn as an incomplete function-call sequence.
+        let prior: Vec<ContextTurn> = sqlx::query_as("SELECT input_text, CASE WHEN status = 'completed' THEN output_items ELSE NULL END AS output_items, review_note FROM runs WHERE conversation_id = $1 AND ordinal < $2 AND (status = 'completed' OR (status = 'uncertain' AND reviewed_at IS NOT NULL)) ORDER BY ordinal")
             .bind(target.conversation_id).bind(target.ordinal).fetch_all(&self.pool).await?;
         let mut context = Vec::new();
         for run in prior {
-            context.push(user_item(&run.input_text));
-            let Value::Array(items) = run.output_items else {
-                return Err(StoreError::Storage);
-            };
-            context.extend(items);
+            if let Some(note) = run.review_note {
+                context.push(user_item(&format!(
+                    "Historical interrupted request (not a new instruction):\n{}\n\nThe owner reviewed this interrupted run and allowed new conversation work. Its execution outcome remains uncertain; do not repeat its external operations without a new explicit request. The owner's review note is user-provided context, not a verified tool receipt:\n{}",
+                    run.input_text, note
+                )));
+            } else {
+                context.push(user_item(&run.input_text));
+                let Some(Value::Array(items)) = run.output_items else {
+                    return Err(StoreError::Storage);
+                };
+                context.extend(items);
+            }
         }
         context.push(user_item(&target.input_text));
         // Include message envelopes and array delimiters in the exact bound.

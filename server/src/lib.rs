@@ -7,3 +7,4 @@ pub mod engine;
 pub mod mcp;
 pub mod runner;
 pub mod store;
+pub mod web;

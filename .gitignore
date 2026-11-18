@@ -1,6 +1,9 @@
 .idea
 /target/
 /.work/
+/web-tests/node_modules/
+/web-tests/test-results/
+/web-tests/playwright-report/
 .env
 .env.*
 !.env.example
