@@ -205,6 +205,7 @@ test('pathological replies render quickly', async ({ page }) => {
       angleLinks: '[a](<'.repeat(30_000),
       badAuthorities: 'http://[/.'.repeat(30_000),
       controlPaths: 'https://a.test/'.repeat(30_000) + '\x01',
+      trimmedAuthorities: 'https://a.test:443./'.repeat(8_000),
       headingSeparator: '- a\n      #' + ' '.repeat(64_000) + '\u2028x\nOutside',
       itemSeparator: '-' + ' '.repeat(64_000) + '\u2028x',
       fenceSeparator: '`'.repeat(64_000) + '\u2028x',

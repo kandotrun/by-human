@@ -561,10 +561,13 @@ function bareUrlEnd(text, start) {
   // The host is ASCII, so Japanese text or markup right after it is not part of it.
   while (end < text.length && AUTHORITY.test(text[end])) end += 1;
   // An invalid host is rejected before its path is read, so repeats stay
-  // linear. Trailing punctuation (`:8443.` or `]`) is trimmed before deciding.
-  let host = end;
-  while (host > start && URL_TRAILING.has(text[host - 1])) host -= 1;
-  if (!safeHref(text.slice(start, end)) && !safeHref(text.slice(start, host))) return 0;
+  // linear. One that is valid only without trailing punctuation (`:8443.` or
+  // `]`) can link on its own, never with a path.
+  if (!safeHref(text.slice(start, end))) {
+    let host = end;
+    while (host > start && URL_TRAILING.has(text[host - 1])) host -= 1;
+    return host < end ? host : 0;
+  }
   let opens = 0;
   let closes = 0;
   if ("/?#".includes(text[end] ?? " ")) {
