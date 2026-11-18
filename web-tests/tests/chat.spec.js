@@ -799,3 +799,27 @@ test('pending text stays hidden while signed out and returns after signing in', 
   await expect(userRows(page)).toHaveText(['ログアウト後に見せない本文']);
   await expect(page.getByRole('button', { name: '送信結果を確認', exact: true })).toBeVisible();
 });
+
+test('a retry that finds the session ended returns to a clean sign-in', async ({ page, context }) => {
+  await connect(page);
+  await newConversation(page);
+  const runs = /\/v1\/conversations\/[^/]+\/runs$/;
+  await page.route(runs, route => route.abort('failed'));
+  await composer(page).fill('再試行で隠す本文');
+  await page.getByRole('button', { name: '送信', exact: true }).click();
+  await expect(page.getByRole('button', { name: '送信結果を確認', exact: true })).toBeVisible();
+  let failures = 1;
+  await page.route('**/v1/conversations', route => {
+    if (route.request().method() !== 'GET' || failures === 0) return route.continue();
+    failures -= 1;
+    return route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"storage_unavailable"}' });
+  });
+  await page.reload();
+  await expect(page.getByRole('button', { name: '再試行', exact: true })).toBeVisible();
+  // The session ends before the owner retries.
+  await context.clearCookies();
+  await page.getByRole('button', { name: '再試行', exact: true }).click();
+  await expect(signInDialog(page)).toBeVisible();
+  await expect(page.locator('#connection-state')).toHaveText('未ログイン');
+  await expect(page.getByText('再試行で隠す本文')).toHaveCount(0);
+});

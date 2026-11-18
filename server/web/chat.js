@@ -467,7 +467,9 @@ async function resumeSession() {
     const response = await fetch("/v1/session", { cache: "no-store", redirect: "error", credentials: "same-origin", signal: connectionAbort.signal });
     if (capturedConnection !== connection) return;
     if (response.status === 401) {
-      $("connect-dialog").showModal();
+      // A retry can find the session ended after the page was signed in, so
+      // reset that state and any pending text before asking for the token.
+      disconnect(signedIn ? SIGNED_OUT : "");
       return;
     }
     if (!response.ok) throw new ApiError(response.status);

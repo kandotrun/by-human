@@ -151,6 +151,10 @@ async fn authenticate(
         }
         Authenticated::Bearer
     } else {
+        // Without an allowed page origin, browser sessions are unavailable.
+        if state.browser_origins.is_empty() {
+            return Err(ApiError::unauthorized());
+        }
         let CookieSecret::Present(secret) = browser_session::read_cookie(request.headers()) else {
             return Err(ApiError::unauthorized());
         };

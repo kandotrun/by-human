@@ -116,6 +116,10 @@ impl BrowserOrigins {
         Self(vec![direct, format!("http://localhost{port}")])
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// True only for a single `Origin` header that exactly matches.
     pub fn allows(&self, headers: &HeaderMap) -> bool {
         let mut values = headers.get_all(header::ORIGIN).iter();

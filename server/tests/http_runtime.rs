@@ -214,6 +214,10 @@ struct TestApp {
 
 impl TestApp {
     async fn start(store: Store, model: Arc<dyn Model>) -> Self {
+        Self::start_with(store, model, true).await
+    }
+
+    async fn start_with(store: Store, model: Arc<dyn Model>, browser_sessions: bool) -> Self {
         let runner = Runner::start(
             store.clone(),
             Arc::new(Engine::new(model, Limits::default())),
@@ -224,11 +228,12 @@ impl TestApp {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{addr}");
-        let app = router(
-            ApiState::new(store, TOKEN.into(), runner.notifier())
-                .unwrap()
-                .with_browser_origins(BrowserOrigins::loopback(addr)),
-        );
+        let state = ApiState::new(store, TOKEN.into(), runner.notifier()).unwrap();
+        let app = router(if browser_sessions {
+            state.with_browser_origins(BrowserOrigins::loopback(addr))
+        } else {
+            state
+        });
         let stop_http = CancellationToken::new();
         let done = stop_http.clone();
         let http = tokio::spawn(async move {
@@ -1116,6 +1121,45 @@ async fn browser_sessions_need_the_token_and_an_allowed_origin_and_can_be_ended(
         StatusCode::UNAUTHORIZED
     );
 
+    app.shutdown().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn browser_sessions_are_unavailable_without_an_allowed_origin() {
+    let db = Database::new().await;
+    let app = TestApp::start_with(db.store.clone(), Arc::new(HappyModel::default()), false).await;
+    let signed_in = app
+        .client
+        .post(format!("{}/v1/sessions", app.base))
+        .header("origin", &app.base)
+        .json(&json!({"token": TOKEN}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(signed_in.status(), StatusCode::FORBIDDEN);
+    // A cookie issued while sessions were available no longer authenticates.
+    let secret = SessionSecret::generate().unwrap();
+    db.store
+        .create_browser_session(&secret.hash(), &token_fingerprint(TOKEN), 3_600)
+        .await
+        .unwrap();
+    let read = app
+        .client
+        .get(format!("{}/v1/conversations", app.base))
+        .header("cookie", format!("by_human_session={}", secret.encode()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::UNAUTHORIZED);
+    let bearer = app
+        .client
+        .get(format!("{}/v1/conversations", app.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bearer.status(), StatusCode::OK);
     app.shutdown().await;
     db.cleanup().await;
 }
