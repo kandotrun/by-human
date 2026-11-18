@@ -127,6 +127,9 @@ test('code paths, fences in lists, URLs in emphasis and table escapes', async ({
     '<ul><li><blockquote><div class="table-scroll"><table><thead><tr><th>a</th></tr></thead><tbody><tr><td>row</td></tr></tbody></table></div></blockquote></li></ul><p>lazy</p>');
   expect(await html(page, '- | a |\n  | - |\n      # x\n  row2\nlazy')).toBe(
     '<ul><li><div class="table-scroll"><table><thead><tr><th>a</th></tr></thead><tbody><tr><td># x</td></tr><tr><td>row2</td></tr></tbody></table></div></li></ul><p>lazy</p>');
+  // A fence in a quote ends with the quote, so a lazy line continues the paragraph after it.
+  expect(await html(page, '- > ```\n  > code\n  ---\n  paragraph\ncontinued')).toBe(
+    '<ul><li><blockquote>' + code('', 'code') + '</blockquote><hr>paragraph<br>continued</li></ul>');
 });
 
 test('hostile input never creates active content', async ({ page }) => {

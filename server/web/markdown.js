@@ -241,8 +241,8 @@ function parseList(lines, start, first, depth) {
     // Lazy continuation is allowed only while the innermost open block is a
     // paragraph. Fences and tables are tracked through nested item and quote
     // markers, so a block opened in a nested item also stops it. A fence ends
-    // only at a matching close inside the quotes it opened in; any other line,
-    // a rule or a list marker included, is code.
+    // at a matching close inside the quotes it opened in, or with those quotes;
+    // any other line, a rule or a list marker included, is code.
     const add = (content) => {
       body.push(content);
       let inner = trimLine(content);
@@ -262,6 +262,14 @@ function parseList(lines, start, first, depth) {
         if (marker[0][0] === ">") quotes += 1;
         else items += 1;
         offset = CONTAINER_MARKER.lastIndex;
+      }
+      if (fenceOpen && quotes < fenceQuotes) {
+        // The quote has ended and its fence with it, so the line is read
+        // again as ordinary item content.
+        fenceOpen = "";
+        body.pop();
+        add(content);
+        return;
       }
       inner = inner.slice(offset);
       // As in parseBlocks, a table row keeps its container and indentation and
