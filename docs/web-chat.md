@@ -46,8 +46,9 @@ permanently removes the conversation's messages, run records and review notes,
 with this tab's draft and unsent text for it; it cannot be undone. A
 conversation with queued or running work, or an uncertain result that has not
 been reviewed, cannot be deleted. A conversation deleted in another tab or
-browser disappears when it is next opened, and a message sent to it is marked
-as not accepted so its text can be returned to the composer.
+browser disappears when it is next opened or its reply stream reconnects, and a
+message sent to it is marked as not accepted so its text can be returned to the
+composer.
 
 The browser loads the latest 100 runs that fit in an 8 MiB response. It marks
 omitted history at the top of the conversation. Older runs remain stored on the

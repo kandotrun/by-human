@@ -367,7 +367,7 @@ async function confirmDelete() {
     deleted(id);
   } catch (error) {
     if (capturedConnection !== connection) return;
-    if (error instanceof ApiError && error.status === 404) return deleted(id);
+    if (error instanceof ApiError && error.status === 404) return deleted(id, true);
     const busy = error instanceof ApiError && error.status === 409;
     $("delete-error").textContent = busy ? DELETE_BUSY : friendlyError(error);
     if (busy && selectedId === id) refreshCurrentConversation();
@@ -377,10 +377,10 @@ async function confirmDelete() {
   }
 }
 
-function deleted(id) {
+function deleted(id, notice = false) {
   const index = conversations.findIndex((item) => item.id === id);
   focusAfterDelete = (conversations[index + 1] ?? conversations[index - 1])?.id ?? "";
-  forgetConversation(id);
+  forgetConversation(id, notice);
   $("delete-dialog").close();
 }
 
@@ -1052,6 +1052,7 @@ async function startStream(id, captured) {
       const response = await fetch(`/v1/runs/${id}/events`, { headers: { "Last-Event-ID": String(cursor) }, cache: "no-store", redirect: "error", credentials: "same-origin", signal: controller.signal });
       if (!valid()) return;
       if (response.status === 401) { disconnect(SIGNED_OUT); return; }
+      if (response.status === 404) throw new ApiError(404);
       if (!response.ok || !response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream") || !response.body) throw new Error("stream");
       progress = label;
       renderControls();
@@ -1095,6 +1096,8 @@ async function startStream(id, captured) {
       throw new Error("stream");
     } catch (error) {
       if (!valid() || error.name === "AbortError") return;
+      // Runs go with their conversation, so neither read can succeed again.
+      if (error instanceof ApiError && error.status === 404) return forgetConversation(captured.id, true);
       progress = "再接続しています";
       renderControls();
       // Only the event stream is retried. The POST and external tools are not.

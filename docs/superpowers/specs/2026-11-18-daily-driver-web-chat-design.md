@@ -197,9 +197,9 @@ DESC)`. The values follow from that rule at all times:
   `409` is shown in the dialog.
 - After a delete, the row, its draft and its pending text disappear, and an
   open conversation returns to the empty state.
-- A `404` while loading, renaming or deleting removes the row and says the
-  conversation was deleted. A `404` when sending marks the message as not
-  accepted, so its text can be returned to the composer.
+- A `404` while loading, following a reply, renaming or deleting removes the
+  row and says the conversation was deleted. A `404` when sending marks the
+  message as not accepted, so its text can be returned to the composer.
 - An accepted message moves its conversation to the top. The list reloads
   when the tab becomes visible again.
 - Escape closes only the topmost dialog or menu, not the drawer behind it.

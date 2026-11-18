@@ -1390,6 +1390,20 @@ test('a conversation deleted elsewhere disappears when opened', async ({ page })
   await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
 });
 
+test('deleting a conversation already deleted elsewhere says so and focuses its neighbour', async ({ page }) => {
+  await connect(page);
+  const keep = await newConversation(page);
+  const gone = await newConversation(page);
+  expect((await page.request.delete(`/v1/conversations/${gone}`, { headers: auth })).status()).toBe(204);
+  await openMenu(page, gone, '削除');
+  const dialog = deleteDialog(page);
+  await dialog.getByRole('button', { name: '削除', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(conversationButton(page, gone)).toHaveCount(0);
+  await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
+  await expect(conversationButton(page, keep)).toBeFocused();
+});
+
 test('a message sent to a conversation deleted elsewhere can be returned', async ({ page }) => {
   await connect(page);
   const id = await newConversation(page);
@@ -1399,6 +1413,42 @@ test('a message sent to a conversation deleted elsewhere can be returned', async
   await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
   await page.getByRole('button', { name: '入力欄に戻す', exact: true }).click();
   await expect(composer(page)).toHaveValue('届かないメッセージ');
+});
+
+test('a reconnecting stream stops and forgets a conversation deleted elsewhere', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  let streams = 0;
+  const { promise: reconnecting, resolve: reportReconnect } = Promise.withResolvers();
+  const { promise: holdReconnect, resolve: releaseReconnect } = Promise.withResolvers();
+  await page.route(/\/v1\/runs\/[^/]+\/events$/, async route => {
+    streams += 1;
+    if (streams > 1) {
+      reportReconnect();
+      await holdReconnect;
+      return route.continue();
+    }
+    // The first stream ends after one event, so the client reconnects.
+    const response = await route.fetch();
+    const [first] = (await response.text()).split(/\r?\n\r?\n/).filter(event => /^id:/m.test(event));
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: `${first}\n\n` });
+  });
+  try {
+    const sent = await send(page, '別のタブで消される会話');
+    await reconnecting;
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+    expect((await page.request.delete(`/v1/conversations/${id}`, { headers: auth })).status()).toBe(204);
+    releaseReconnect();
+    await expect(conversationButton(page, id)).toHaveCount(0);
+    await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
+    await expect(page.locator('#run-progress')).toBeHidden();
+    // A retry would follow within a second of the failed reconnect.
+    const retried = await page.waitForRequest(/\/v1\/runs\//, { timeout: 1_500 }).then(() => true, () => false);
+    expect(retried).toBe(false);
+    expect(streams).toBe(2);
+  } finally {
+    releaseReconnect();
+  }
 });
 
 test('the list reloads when the tab becomes visible again', async ({ page }) => {
