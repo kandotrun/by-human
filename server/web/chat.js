@@ -6,6 +6,8 @@ const STORAGE_KEY = "by-human-chat-v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const active = (run) => run && ["queued", "running"].includes(run.status);
 const unresolved = (run) => run?.status === "uncertain" && !run.reviewed_at;
+const matchesSubmission = (run, pending) => run.id === pending.runId ||
+  (run.idempotency_key === pending.key && run.input_text === pending.text);
 
 let token = "";
 let connection = 0;
@@ -205,7 +207,7 @@ function renderMessages(forceScroll = false) {
     fragment.append(turn);
   }
   const pending = outbox.get(selectedId);
-  const matched = pending && runs.some((run) => run.id === pending.runId || run.idempotency_key === pending.key);
+  const matched = pending && runs.some((run) => matchesSubmission(run, pending));
   if (pending && !matched) {
     const turn = element("div", "turn");
     const user = element("div", "message user pending", pending.text);
@@ -217,9 +219,12 @@ function renderMessages(forceScroll = false) {
   log.replaceChildren(fragment);
   const empty = !runs.length && !pending;
   $("empty-state").hidden = !empty;
-  $("empty-state").querySelector("h2").textContent = loading ? "会話を読み込んでいます" : "何から始めますか？";
-  $("empty-state").querySelector("p").textContent = currentConversation ? "メッセージを送って、会話を始めてください。" : "新しい会話を作成して、メッセージを送ってください。";
-  $("empty-new-chat").hidden = Boolean(currentConversation) || loading;
+  const failedLoad = selectedId && !currentConversation && !loading;
+  $("empty-state").querySelector("h2").textContent = loading ? "会話を読み込んでいます" : failedLoad ? "会話を読み込めませんでした" : "何から始めますか？";
+  const emptyHint = $("empty-state").querySelector("p");
+  emptyHint.hidden = Boolean(selectedId) && !currentConversation;
+  emptyHint.textContent = selectedId ? "メッセージを送って、会話を始めてください。" : "新しい会話を作成して、メッセージを送ってください。";
+  $("empty-new-chat").hidden = Boolean(selectedId);
   if (forceScroll || nearBottom) area.scrollTop = area.scrollHeight;
   else area.scrollTop = oldTop;
 }
@@ -288,7 +293,7 @@ async function refreshConversations(capturedConnection = connection) {
 function reconcileOutbox() {
   const pending = outbox.get(selectedId);
   if (!pending) return;
-  const found = runs.find((run) => run.id === pending.runId || run.idempotency_key === pending.key);
+  const found = runs.some((run) => matchesSubmission(run, pending));
   if (found) {
     if (sending.get(selectedId) === pending.key) sending.delete(selectedId);
     outbox.delete(selectedId);
@@ -301,6 +306,23 @@ function updateConversationTitle(id, title) {
   const listed = conversations.find((item) => item.id === id);
   if (listed) listed.title = title;
   if (currentConversation?.id === id) currentConversation.title = title;
+}
+
+async function refreshConversationTitle(id, capturedConnection) {
+  const listed = conversations.find((item) => item.id === id);
+  if (!listed) return;
+  const previousTitle = listed.title;
+  try {
+    const result = await api("/conversations");
+    if (capturedConnection !== connection || listed.title !== previousTitle) return;
+    const latest = result.conversations.find((item) => item.id === id);
+    if (!latest) return;
+    updateConversationTitle(id, latest.title);
+    renderSidebar();
+    if (selectedId === id) renderControls();
+  } catch {
+    // Selecting the conversation will try loading its title again.
+  }
 }
 
 async function selectConversation(id, focusComposer = false) {
@@ -329,7 +351,11 @@ async function loadConversationSnapshot({ focusComposer = false, refresh = false
     if (!ownsSnapshot()) return;
     currentConversation = result.conversation;
     updateConversationTitle(captured.id, currentConversation.title);
-    runs = result.runs;
+    const displayedRuns = new Map(runs.map((run) => [run.id, run]));
+    runs = result.runs.map((run) => {
+      const displayed = displayedRuns.get(run.id);
+      return displayed && displayed.event_seq > run.event_seq ? displayed : run;
+    });
     olderRunsOmitted = result.older_runs_omitted;
     reconcileOutbox();
     loading = false;
@@ -340,8 +366,9 @@ async function loadConversationSnapshot({ focusComposer = false, refresh = false
   } catch (error) {
     if (!ownsSnapshot() || error.name === "AbortError") return;
     loading = false;
-    if (!refresh) currentConversation = null;
-    showNotice(friendlyError(error));
+    // The displayed runs can predate an accepted send or conflict.
+    currentConversation = null;
+    showNotice(`${friendlyError(error)} サイドバーから会話を選び直してください。`);
     render();
   }
 }
@@ -487,12 +514,14 @@ async function dispatch(pending) {
       pending.rejected = error instanceof ApiError && [400, 409, 413, 422].includes(error.status);
       saveSession();
     }
-    if (selectedId !== captured.id || error.name === "AbortError") return;
+    if (error.name === "AbortError") return;
     if (error instanceof ApiError && error.status === 409) {
       // Another client may already have submitted the first message.
-      await refreshCurrentConversation();
+      if (selectedId === captured.id) await refreshCurrentConversation();
+      else await refreshConversationTitle(captured.id, captured.connection);
       return;
     }
+    if (selectedId !== captured.id) return;
     showNotice(friendlyError(error));
     render();
   }

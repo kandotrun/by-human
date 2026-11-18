@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use sqlx::{
     Connection, FromRow, PgConnection, PgPool, Postgres, Transaction, postgres::PgPoolOptions,
 };
+use unicode_general_category::{GeneralCategory, get_general_category};
 use uuid::Uuid;
 
 type OwnerConnection = Arc<tokio::sync::Mutex<PgConnection>>;
@@ -831,12 +832,18 @@ impl Store {
 }
 
 fn title_from_message(message: &str) -> String {
-    let visible: String = message
+    let without_controls: String = message
         .chars()
         .filter(|ch| !ch.is_control() || ch.is_whitespace())
         .collect();
-    let title = visible.split_whitespace().collect::<Vec<_>>().join(" ");
-    if title.is_empty() {
+    let title = without_controls
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title
+        .chars()
+        .all(|ch| ch.is_whitespace() || get_general_category(ch) == GeneralCategory::Format)
+    {
         return UNTITLED_CONVERSATION.to_owned();
     }
     let mut indices = title.char_indices();
@@ -920,4 +927,18 @@ async fn append_system_event(
     .bind(payload)
     .fetch_one(&mut **tx)
     .await?)
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::{UNTITLED_CONVERSATION, title_from_message};
+
+    #[test]
+    fn format_only_message_uses_placeholder_and_visible_emoji_keeps_joiners() {
+        assert_eq!(
+            title_from_message("\u{200b} \u{200c}\u{feff}"),
+            UNTITLED_CONVERSATION
+        );
+        assert_eq!(title_from_message("  👩‍💻  作業  "), "👩‍💻 作業");
+    }
 }
