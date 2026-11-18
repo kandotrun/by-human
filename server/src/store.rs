@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use sqlx::{
     Connection, FromRow, PgConnection, PgPool, Postgres, Transaction, postgres::PgPoolOptions,
 };
+use unicode_general_category::{GeneralCategory, get_general_category};
 use uuid::Uuid;
 
 type OwnerConnection = Arc<tokio::sync::Mutex<PgConnection>>;
@@ -24,6 +25,8 @@ struct OwnerState {
 }
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+const UNTITLED_CONVERSATION: &str = "新しい会話";
+pub(crate) const GENERATED_TITLE_CHARS: usize = 40;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +54,8 @@ pub struct Conversation {
     pub id: Uuid,
     pub title: String,
     pub created_at: DateTime<Utc>,
+    #[serde(skip)]
+    pub(crate) title_pending: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, FromRow, Serialize)]
@@ -79,6 +84,7 @@ pub struct Run {
 pub struct Enqueued {
     pub run: Run,
     pub created: bool,
+    pub conversation_title: String,
 }
 
 #[derive(Clone, Debug, Deserialize, FromRow, Serialize)]
@@ -302,13 +308,22 @@ impl Store {
                 "title must contain 1 to 200 characters",
             ));
         }
-        Ok(
-            sqlx::query_as("INSERT INTO conversations (id, title) VALUES ($1, $2) RETURNING *")
-                .bind(Uuid::new_v4())
-                .bind(title)
-                .fetch_one(&self.pool)
-                .await?,
+        self.insert_conversation(title, false).await
+    }
+
+    pub async fn create_untitled_conversation(&self) -> Result<Conversation> {
+        self.insert_conversation(UNTITLED_CONVERSATION, true).await
+    }
+
+    async fn insert_conversation(&self, title: &str, title_pending: bool) -> Result<Conversation> {
+        Ok(sqlx::query_as(
+            "INSERT INTO conversations (id, title, title_pending) VALUES ($1, $2, $3) RETURNING *",
         )
+        .bind(Uuid::new_v4())
+        .bind(title)
+        .bind(title_pending)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     pub async fn get_conversation(&self, id: Uuid) -> Result<Conversation> {
@@ -345,14 +360,13 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         // Lock the conversation before inspecting idempotency and unfinished
         // state. This serializes even two different keys arriving together.
-        let found =
-            sqlx::query_scalar::<_, Uuid>("SELECT id FROM conversations WHERE id = $1 FOR UPDATE")
-                .bind(conversation_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        if found.is_none() {
-            return Err(StoreError::NotFound);
-        }
+        let (mut conversation_title, title_pending): (String, bool) = sqlx::query_as(
+            "SELECT title, title_pending FROM conversations WHERE id = $1 FOR UPDATE",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StoreError::NotFound)?;
         let prior: Option<Run> = sqlx::query_as(
             "SELECT * FROM runs WHERE conversation_id = $1 AND idempotency_key = $2",
         )
@@ -369,6 +383,7 @@ impl Store {
             return Ok(Enqueued {
                 run,
                 created: false,
+                conversation_title,
             });
         }
         let unfinished: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runs WHERE conversation_id = $1 AND (status IN ('queued', 'running') OR (status = 'uncertain' AND reviewed_at IS NULL)))")
@@ -380,10 +395,22 @@ impl Store {
         }
         let run: Run = sqlx::query_as("INSERT INTO runs (id, conversation_id, idempotency_key, input_text, status) VALUES ($1, $2, $3, $4, 'queued') RETURNING *")
             .bind(Uuid::new_v4()).bind(conversation_id).bind(key).bind(text).fetch_one(&mut *tx).await?;
+        if title_pending {
+            conversation_title = title_from_message(text);
+            sqlx::query("UPDATE conversations SET title = $2, title_pending = FALSE WHERE id = $1")
+                .bind(conversation_id)
+                .bind(&conversation_title)
+                .execute(&mut *tx)
+                .await?;
+        }
         append_system_event(&mut tx, run.id, "run.queued", json!({"status": "queued"})).await?;
         let run = fetch_run_tx(&mut tx, run.id).await?;
         tx.commit().await?;
-        Ok(Enqueued { run, created: true })
+        Ok(Enqueued {
+            run,
+            created: true,
+            conversation_title,
+        })
     }
 
     pub async fn get_run(&self, id: Uuid) -> Result<Run> {
@@ -804,6 +831,31 @@ impl Store {
     }
 }
 
+fn title_from_message(message: &str) -> String {
+    let without_controls: String = message
+        .chars()
+        .filter(|ch| !ch.is_control() || ch.is_whitespace())
+        .collect();
+    let title = without_controls
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title
+        .chars()
+        .all(|ch| ch.is_whitespace() || get_general_category(ch) == GeneralCategory::Format)
+    {
+        return UNTITLED_CONVERSATION.to_owned();
+    }
+    let mut indices = title.char_indices();
+    if let Some((end, _)) = indices
+        .nth(GENERATED_TITLE_CHARS - 1)
+        .filter(|_| indices.next().is_some())
+    {
+        return format!("{}…", title[..end].trim_end());
+    }
+    title
+}
+
 fn validate_running(run: &Run, owner_id: Uuid, allow_cancellation: bool) -> Result<()> {
     if run.status != RunStatus::Running || run.owner_id != Some(owner_id) {
         return Err(StoreError::Conflict("run is no longer owned and running"));
@@ -875,4 +927,18 @@ async fn append_system_event(
     .bind(payload)
     .fetch_one(&mut **tx)
     .await?)
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::{UNTITLED_CONVERSATION, title_from_message};
+
+    #[test]
+    fn format_only_message_uses_placeholder_and_visible_emoji_keeps_joiners() {
+        assert_eq!(
+            title_from_message("\u{200b} \u{200c}\u{feff}"),
+            UNTITLED_CONVERSATION
+        );
+        assert_eq!(title_from_message("  👩‍💻  作業  "), "👩‍💻 作業");
+    }
 }

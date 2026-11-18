@@ -90,7 +90,6 @@ dialog::backdrop { background: #172a444d; backdrop-filter: blur(4px); }
 .dialog-content .field-note { font-size: 11px; margin-top: 10px; }
 .dialog-content .form-error { color: var(--danger); font-size: 12px; margin: 12px 0; }
 .dialog-content > .primary-button, .dialog-content > form > .primary-button { width: 100%; }
-.dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
 .dialog-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
 .review-dialog { width: min(660px, calc(100% - 32px)); }
 .review-records { margin: 18px 0 24px; }

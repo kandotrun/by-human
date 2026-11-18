@@ -10,7 +10,7 @@ public TLS endpoint or device pairing UI.
 | Method | Route | Result |
 | --- | --- | --- |
 | GET | `/health` | Minimal PostgreSQL readiness; no authentication required |
-| POST | `/v1/conversations` | Create with `{"title":"..."}` |
+| POST | `/v1/conversations` | Create with `{}` for an automatic title or `{"title":"..."}` for an explicit title |
 | GET | `/v1/conversations` | Latest 100 conversations |
 | GET | `/v1/conversations/{id}` | Conversation, latest chat messages and public run states |
 | GET | `/v1/conversations/{id}/snapshot` | Browser view with a bounded window of public runs |
@@ -25,6 +25,12 @@ A new submission returns `202` with its run ID. An exact retry of the same key
 and text returns the same run with `200`. Changing the text behind that key, or
 starting distinct work while the conversation has queued/running/unreviewed uncertain work,
 returns `409`. A missing resource returns `404`.
+
+Conversations created without a title start as `新しい会話`. When the first
+message is accepted, the server saves a short title derived from that message
+in the same transaction. The submission response includes `conversation_title`
+on both acceptance and exact retry. Existing conversations and explicitly
+supplied titles retain their names.
 
 For SSE, preserve each integer `id` and reconnect to the **same run** with
 `Last-Event-ID`. Events are replayed from PostgreSQL; closing the stream does not

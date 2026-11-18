@@ -82,6 +82,64 @@ fn completed(items: Vec<Value>, text: &str) -> RunCompletion {
 }
 
 #[tokio::test]
+async fn first_accepted_message_sets_automatic_title_once() {
+    let f = Fixture::new().await;
+    let automatic = f.store.create_untitled_conversation().await.unwrap();
+    assert_eq!(automatic.title, "新しい会話");
+    assert!(matches!(
+        f.store.enqueue(automatic.id, "empty", "  \t ").await,
+        Err(StoreError::InvalidInput(_))
+    ));
+    assert_eq!(
+        f.store.get_conversation(automatic.id).await.unwrap().title,
+        "新しい会話"
+    );
+
+    let message = format!(" \t日本語の\n タイトル\u{0007} {}", "井".repeat(50));
+    let expected = format!("日本語の タイトル {}…", "井".repeat(29));
+    let first = f
+        .store
+        .enqueue(automatic.id, "first", &message)
+        .await
+        .unwrap();
+    assert!(first.created);
+    assert_eq!(first.conversation_title, expected);
+    let retry = f
+        .store
+        .enqueue(automatic.id, "first", &message)
+        .await
+        .unwrap();
+    assert!(!retry.created);
+    assert_eq!(retry.run.id, first.run.id);
+    assert_eq!(retry.conversation_title, expected);
+
+    f.store.request_cancel(first.run.id).await.unwrap();
+    let next = f
+        .store
+        .enqueue(automatic.id, "next", "別の話題")
+        .await
+        .unwrap();
+    assert_eq!(next.conversation_title, expected);
+    assert_eq!(
+        f.store.get_conversation(automatic.id).await.unwrap().title,
+        expected
+    );
+
+    let manual = f.store.create_conversation("新しい会話").await.unwrap();
+    let manual_run = f
+        .store
+        .enqueue(manual.id, "manual", "手動名は変更しない")
+        .await
+        .unwrap();
+    assert_eq!(manual_run.conversation_title, "新しい会話");
+    assert_eq!(
+        f.store.get_conversation(manual.id).await.unwrap().title,
+        "新しい会話"
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
 async fn concurrent_idempotency_and_conversation_reservation_are_atomic() {
     let f = Fixture::new().await;
     let conversation = f.store.create_conversation("日本語の会話").await.unwrap();

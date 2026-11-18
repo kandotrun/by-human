@@ -5,6 +5,9 @@ const auth = { Authorization: `Bearer ${TOKEN}` };
 const composer = page => page.getByRole('textbox', { name: 'メッセージ', exact: true });
 const userRows = page => page.locator('#chat-log [data-role="user"]');
 const assistantRows = page => page.locator('#chat-log [data-role="assistant"]');
+const newChat = page => page.locator('#new-chat');
+const conversationButton = (page, id) => page.locator(`#conversation-list [data-conversation-id="${id}"]`);
+const conversationTitle = page => page.locator('#conversation-title');
 
 async function connect(page, navigate = true) {
   if (navigate) await page.goto('/');
@@ -14,16 +17,13 @@ async function connect(page, navigate = true) {
   await expect(dialog).toBeHidden();
 }
 
-async function newConversation(page, title) {
-  await page.getByRole('button', { name: '新しい会話', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: '新しい会話', exact: true });
-  await dialog.getByLabel('会話の名前', { exact: true }).fill(title);
+async function newConversation(page) {
   const response = page.waitForResponse(response =>
     response.url().endsWith('/v1/conversations') && response.request().method() === 'POST');
-  await dialog.getByRole('button', { name: '作成', exact: true }).click();
+  await newChat(page).click();
   const created = await (await response).json();
-  await expect(dialog).toBeHidden();
-  await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
+  await expect(conversationButton(page, created.id)).toHaveAttribute('aria-current', 'page');
+  await expect(conversationTitle(page)).toHaveText('新しい会話');
   await expect(composer(page)).toBeEnabled();
   return created.id;
 }
@@ -66,7 +66,7 @@ test('Japanese send has one transcript row, clears the draft and never stores th
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await connect(page);
-  const id = await newConversation(page, '日本語で会話');
+  const id = await newConversation(page);
   const sent = await send(page, '今日は何をしよう？');
   await expect(composer(page)).toHaveValue('');
   await expect(userRows(page)).toHaveCount(1);
@@ -82,27 +82,172 @@ test('Japanese send has one transcript row, clears the draft and never stores th
   await page.screenshot({ path: testInfo.outputPath('desktop-chat.png'), fullPage: true });
 });
 
+test('a new conversation takes its title from the first message and keeps it after reload', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(composer(page)).toBeFocused();
+  const first = await send(page, '京都への旅行\n日程を考えて');
+  const title = '京都への旅行 日程を考えて';
+  await expect(conversationTitle(page)).toHaveText(title);
+  await expect(conversationButton(page, id)).toHaveText(title);
+  await expect.poll(async () => (await run(page, first.id)).status).toBe('completed');
+
+  const second = await send(page, '宿泊先も教えて');
+  await expect.poll(async () => (await run(page, second.id)).status).toBe('completed');
+  await expect(conversationTitle(page)).toHaveText(title);
+  await expect(conversationButton(page, id)).toHaveText(title);
+
+  await page.reload();
+  await connect(page, false);
+  await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
+  await expect(conversationTitle(page)).toHaveText(title);
+  await expect(conversationButton(page, id)).toHaveText(title);
+  expect((await conversation(page, id)).conversation.title).toBe(title);
+});
+
+test('a competing first send with the same key keeps different rejected text', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const path = `/v1/conversations/${id}/runs`;
+  let runId;
+  await page.route(`**${path}`, async route => {
+    const { idempotency_key } = route.request().postDataJSON();
+    const winner = await page.request.post(path, {
+      headers: auth,
+      data: { message: '停止テスト', idempotency_key },
+    });
+    expect(winner.status()).toBe(202);
+    runId = (await winner.json()).id;
+    await route.continue();
+  });
+  try {
+    const rejected = page.waitForResponse(response =>
+      response.url().endsWith(path) && response.request().method() === 'POST');
+    await composer(page).fill('別のタブで書いたメッセージ');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    expect((await rejected).status()).toBe(409);
+    await expect(conversationTitle(page)).toHaveText('停止テスト');
+    await expect(conversationButton(page, id)).toHaveText('停止テスト');
+    await expect(page.getByRole('button', { name: '停止', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '入力欄に戻す', exact: true }).click();
+    await expect(composer(page)).toHaveValue('別のタブで書いたメッセージ');
+    await expect(userRows(page)).toHaveText(['停止テスト']);
+  } finally {
+    if (runId) {
+      await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+      await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+    }
+  }
+});
+
+test('an offscreen first-send conflict updates only that sidebar title', async ({ page }) => {
+  await connect(page);
+  const other = await newConversation(page);
+  await composer(page).fill('別の会話の下書き');
+  const id = await newConversation(page);
+  const path = `/v1/conversations/${id}/runs`;
+  const winner = await page.request.post(path, {
+    headers: auth,
+    data: { message: '停止テスト', idempotency_key: 'offscreen-first-send' },
+  });
+  expect(winner.status()).toBe(202);
+  const { id: runId } = await winner.json();
+  const { promise: holdConflict, resolve: releaseConflict } = Promise.withResolvers();
+  await page.route(`**${path}`, async route => {
+    const response = await route.fetch();
+    expect(response.status()).toBe(409);
+    await holdConflict;
+    await route.fulfill({ response });
+  });
+  try {
+    const sending = page.waitForRequest(request => request.url().endsWith(path));
+    await composer(page).fill('競合するメッセージ');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await sending;
+    await conversationButton(page, other).click();
+    await expect(composer(page)).toBeEnabled();
+
+    releaseConflict();
+    await expect(conversationButton(page, id)).toHaveText('停止テスト');
+    await expect(conversationButton(page, other)).toHaveAttribute('aria-current', 'page');
+    await expect(conversationTitle(page)).toHaveText('新しい会話');
+    await expect(composer(page)).toHaveValue('別の会話の下書き');
+    await expect(userRows(page)).toHaveCount(0);
+  } finally {
+    releaseConflict();
+    await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+    await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+  }
+});
+
+test('refreshing a conflicting send does not interrupt opening a new conversation', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const path = `/v1/conversations/${id}/runs`;
+  const winner = await page.request.post(path, {
+    headers: auth,
+    data: { message: '停止テスト', idempotency_key: 'other-client-first-send' },
+  });
+  expect(winner.status()).toBe(202);
+  const { id: runId } = await winner.json();
+  const { promise: holdConflict, resolve: releaseConflict } = Promise.withResolvers();
+  const { promise: holdCreate, resolve: releaseCreate } = Promise.withResolvers();
+  await page.route(`**${path}`, async route => {
+    const response = await route.fetch();
+    expect(response.status()).toBe(409);
+    await holdConflict;
+    await route.fulfill({ response });
+  });
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() === 'POST') await holdCreate;
+    await route.continue();
+  });
+  try {
+    await composer(page).fill('競合するメッセージ');
+    const sending = page.waitForRequest(request => request.url().endsWith(path));
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await sending;
+    const creating = page.waitForRequest(request =>
+      request.url().endsWith('/v1/conversations') && request.method() === 'POST');
+    await newChat(page).click();
+    await creating;
+    releaseConflict();
+    await expect(conversationTitle(page)).toHaveText('停止テスト');
+    const created = page.waitForResponse(response =>
+      response.url().endsWith('/v1/conversations') && response.status() === 201);
+    releaseCreate();
+    const { id: nextId } = await (await created).json();
+    await expect(conversationButton(page, nextId)).toHaveAttribute('aria-current', 'page');
+    await expect(conversationTitle(page)).toHaveText('新しい会話');
+    await expect(composer(page)).toBeFocused();
+  } finally {
+    releaseConflict();
+    releaseCreate();
+    await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+    await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+  }
+});
+
 test('conversation creation is available after reconnecting from a rejected token', async ({ page }) => {
   await connect(page);
+  let rejected = false;
   await page.route('**/v1/conversations', route => {
-    const request = route.request();
-    if (request.method() === 'POST' && request.postDataJSON().title === '認証切れ') {
+    if (route.request().method() === 'POST' && !rejected) {
+      rejected = true;
       return route.fulfill({ status: 401 });
     }
     return route.continue();
   });
-  await page.getByRole('button', { name: '新しい会話', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: '新しい会話', exact: true });
-  await dialog.getByLabel('会話の名前', { exact: true }).fill('認証切れ');
-  await dialog.getByRole('button', { name: '作成', exact: true }).click();
+  await newChat(page).click();
   await expect(page.getByRole('dialog', { name: 'by-human に接続', exact: true })).toBeVisible();
   await connect(page, false);
-  await newConversation(page, '再接続後に作成');
+  await newConversation(page);
 });
 
 test('IME confirmation Enter does not submit and untrusted HTML stays text', async ({ page }) => {
   await connect(page);
-  const id = await newConversation(page, '変換と表示');
+  const id = await newConversation(page);
   await composer(page).fill('にほんご');
   await composer(page).dispatchEvent('compositionstart');
   await composer(page).dispatchEvent('keydown', { key: 'Enter', code: 'Enter', isComposing: true, keyCode: 229 });
@@ -115,34 +260,34 @@ test('IME confirmation Enter does not submit and untrusted HTML stays text', asy
   await expect(userRows(page)).toHaveText(text);
   await expect(assistantRows(page)).toContainText(text);
   await expect(page.locator('#chat-log img')).toHaveCount(0);
+  await expect(page.locator('#conversation-title img, #conversation-list img')).toHaveCount(0);
   expect(await page.evaluate(() => window.__injected)).toBeUndefined();
 });
 
 test('Stop and conversation switching preserve distinct drafts and isolate streamed text', async ({ page }) => {
   await connect(page);
-  await newConversation(page, '作業 A');
-  await newConversation(page, '作業 B');
-  const nav = page.getByRole('navigation', { name: '会話一覧', exact: true });
-  await nav.getByRole('button', { name: '作業 A', exact: true }).click();
+  const first = await newConversation(page);
+  const second = await newConversation(page);
+  await conversationButton(page, first).click();
   const sent = await send(page, '停止テスト');
   await expect(assistantRows(page)).toHaveText('停止操作を待っています。');
   await composer(page).fill('A の下書き');
-  await nav.getByRole('button', { name: '作業 B', exact: true }).click();
+  await conversationButton(page, second).click();
   await expect(assistantRows(page)).toHaveCount(0);
   await composer(page).fill('B の下書き');
-  await nav.getByRole('button', { name: '作業 A', exact: true }).click();
+  await conversationButton(page, first).click();
   await expect(composer(page)).toHaveValue('A の下書き');
   await expect(assistantRows(page)).toHaveText('停止操作を待っています。');
   await page.getByRole('button', { name: '停止', exact: true }).click();
   await expect.poll(async () => (await run(page, sent.id)).status).toBe('cancelled');
-  await nav.getByRole('button', { name: '作業 B', exact: true }).click();
+  await conversationButton(page, second).click();
   await expect(composer(page)).toHaveValue('B の下書き');
   await expect(assistantRows(page)).toHaveCount(0);
 });
 
 test('lost send acknowledgment survives reload and reuses the original identity', async ({ page }) => {
   await connect(page);
-  const id = await newConversation(page, '送信結果の確認');
+  const id = await newConversation(page);
   const attempts = [];
   let first = true;
   await page.route(/\/v1\/conversations\/[^/]+\/runs$/, async route => {
@@ -171,6 +316,8 @@ test('lost send acknowledgment survives reload and reuses the original identity'
   await expect(page.getByRole('button', { name: '送信結果を確認', exact: true })).toBeHidden();
   await expect(userRows(page)).toHaveCount(1);
   await expect(assistantRows(page)).toHaveText('こんにちは。「同じ送信を二重にしない」を受け取りました。');
+  await expect(conversationTitle(page)).toHaveText('同じ送信を二重にしない');
+  await expect(conversationButton(page, id)).toHaveText('同じ送信を二重にしない');
   await expect(composer(page)).toHaveValue('確認中に書いた次の下書き');
   expect(attempts).toHaveLength(2);
   expect(attempts[1]).toEqual(attempts[0]);
@@ -179,7 +326,7 @@ test('lost send acknowledgment survives reload and reuses the original identity'
 
 test('failed browser persistence keeps the draft and does not dispatch a new run', async ({ page }) => {
   await connect(page);
-  const id = await newConversation(page, '保存できない場合');
+  const id = await newConversation(page);
   await page.evaluate(() => {
     Storage.prototype.setItem = () => { throw new DOMException('Synthetic quota boundary', 'QuotaExceededError'); };
   });
@@ -193,8 +340,8 @@ test('failed browser persistence keeps the draft and does not dispatch a new run
 
 test('a delayed send settles after leaving and returning to the conversation', async ({ page }) => {
   await connect(page);
-  await newConversation(page, '別の会話');
-  const id = await newConversation(page, '送信先');
+  const other = await newConversation(page);
+  const id = await newConversation(page);
   let release;
   const held = new Promise(resolve => { release = resolve; });
   const routePattern = `**/v1/conversations/${id}/runs`;
@@ -207,14 +354,16 @@ test('a delayed send settles after leaving and returning to the conversation', a
     const request = page.waitForRequest(req => req.url().endsWith(`/conversations/${id}/runs`));
     await page.getByRole('button', { name: '送信', exact: true }).click();
     await request;
-    const nav = page.getByRole('navigation', { name: '会話一覧', exact: true });
-    await nav.getByRole('button', { name: '別の会話', exact: true }).click();
-    await nav.getByRole('button', { name: '送信先', exact: true }).click();
+    await conversationButton(page, other).click();
+    await conversationButton(page, id).click();
     await composer(page).fill('次の下書き');
     await expect(page.getByRole('button', { name: '送信結果を確認', exact: true })).toBeHidden();
     await expect(page.getByText('送信しています', { exact: true })).toBeVisible();
     release();
     await expect(assistantRows(page)).toHaveText('こんにちは。「受付を待つメッセージ」を受け取りました。');
+    await expect(conversationTitle(page)).toHaveText('受付を待つメッセージ');
+    await expect(conversationButton(page, id)).toHaveText('受付を待つメッセージ');
+    await expect(conversationButton(page, other)).toHaveText('新しい会話');
     await expect(userRows(page)).toHaveCount(1);
     await expect(composer(page)).toHaveValue('次の下書き');
     await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
@@ -223,10 +372,116 @@ test('a delayed send settles after leaving and returning to the conversation', a
   }
 });
 
+test('a failed refresh leaves sending disabled until the selected history loads', async ({ page }) => {
+  await connect(page);
+  const other = await newConversation(page);
+  const id = await newConversation(page);
+  const base = `/v1/conversations/${id}`;
+  const { promise: holdAck, resolve: releaseAck } = Promise.withResolvers();
+  const { promise: accepted, resolve: reportAccepted } = Promise.withResolvers();
+  const { promise: holdSnapshot, resolve: releaseSnapshot } = Promise.withResolvers();
+  const { promise: snapshotArrived, resolve: reportSnapshot } = Promise.withResolvers();
+  let snapshotRequests = 0;
+  let runId;
+  await page.route(`**${base}/runs`, async route => {
+    const response = await route.fetch();
+    runId = (await response.json()).id;
+    reportAccepted();
+    await holdAck;
+    await route.fulfill({ response });
+  });
+  await page.route(`**${base}/snapshot`, async route => {
+    snapshotRequests += 1;
+    if (snapshotRequests === 1) {
+      reportSnapshot();
+      await holdSnapshot;
+      return route.continue();
+    }
+    if (snapshotRequests === 2) return route.fulfill({ status: 503 });
+    return route.continue();
+  });
+  try {
+    await composer(page).fill('停止テスト');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await accepted;
+    await composer(page).fill('残しておきたい下書き');
+    await conversationButton(page, other).click();
+    await conversationButton(page, id).click();
+    await snapshotArrived;
+    releaseAck();
+    await expect(page.locator('#notice')).toContainText('サーバーに接続できませんでした');
+    await expect(composer(page)).toBeDisabled();
+    await expect(page.getByRole('button', { name: '送信', exact: true })).toBeDisabled();
+    await expect(composer(page)).toHaveValue('残しておきたい下書き');
+
+    releaseSnapshot();
+    await conversationButton(page, id).click();
+    await expect(userRows(page)).toHaveText(['停止テスト']);
+    await expect(page.getByRole('button', { name: '停止', exact: true })).toBeVisible();
+    await expect(composer(page)).toBeEnabled();
+    await expect(composer(page)).toHaveValue('残しておきたい下書き');
+  } finally {
+    releaseAck();
+    releaseSnapshot();
+    if (runId) {
+      await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+      await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+    }
+  }
+});
+
+test('a failed refresh cannot enable Send on history that predates acceptance', async ({ page }) => {
+  await connect(page);
+  const other = await newConversation(page);
+  const id = await newConversation(page);
+  const base = `/v1/conversations/${id}`;
+  const { promise: holdSend, resolve: releaseSend } = Promise.withResolvers();
+  const { promise: sendArrived, resolve: reportSend } = Promise.withResolvers();
+  let snapshots = 0;
+  let runId;
+  await page.route(`**${base}/runs`, async route => {
+    reportSend();
+    await holdSend;
+    const response = await route.fetch();
+    runId = (await response.json()).id;
+    await route.fulfill({ response });
+  });
+  await page.route(`**${base}/snapshot`, route => {
+    if (++snapshots === 2) return route.fulfill({ status: 503 });
+    return route.continue();
+  });
+  try {
+    await composer(page).fill('停止テスト');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await sendArrived;
+    await conversationButton(page, other).click();
+    await conversationButton(page, id).click();
+    await composer(page).fill('次の下書き');
+
+    releaseSend();
+    await expect(page.locator('#notice')).toContainText('サーバーに接続できませんでした');
+    await expect(conversationTitle(page)).toHaveText('停止テスト');
+    await expect(page.getByRole('button', { name: '送信', exact: true })).toBeDisabled();
+    await expect(composer(page)).toHaveValue('次の下書き');
+
+    await conversationButton(page, id).click();
+    await expect(userRows(page)).toHaveText(['停止テスト']);
+    await expect(page.getByRole('button', { name: '停止', exact: true })).toBeVisible();
+    await expect(composer(page)).toBeEnabled();
+    await expect(composer(page)).toHaveValue('次の下書き');
+  } finally {
+    releaseSend();
+    if (runId) {
+      await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+      await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+    }
+  }
+});
+
 test('history settles an accepted send while its response is still delayed', async ({ page }) => {
   await connect(page);
-  await newConversation(page, '切替先');
-  const id = await newConversation(page, '受付済みの会話');
+  const other = await newConversation(page);
+  const id = await newConversation(page);
   const { promise: held, resolve: release } = Promise.withResolvers();
   const { promise: accepted, resolve: reportAccepted } = Promise.withResolvers();
   await page.route(`**/v1/conversations/${id}/runs`, async route => {
@@ -241,10 +496,10 @@ test('history settles an accepted send while its response is still delayed', asy
     await page.getByRole('button', { name: '送信', exact: true }).click();
     const first = await accepted;
     await expect.poll(async () => (await run(page, first.id)).status).toBe('completed');
-    const nav = page.getByRole('navigation', { name: '会話一覧', exact: true });
-    await nav.getByRole('button', { name: '切替先', exact: true }).click();
-    await nav.getByRole('button', { name: '受付済みの会話', exact: true }).click();
+    await conversationButton(page, other).click();
+    await conversationButton(page, id).click();
     await expect(userRows(page)).toHaveText(['先に受け付けた送信']);
+    await expect(conversationButton(page, id)).toHaveText('先に受け付けた送信');
     const next = await send(page, '次の送信');
     await expect.poll(async () => (await run(page, next.id)).status).toBe('completed');
     const late = page.waitForResponse(response => response.url().endsWith(`/conversations/${id}/runs`));
@@ -259,7 +514,7 @@ test('history settles an accepted send while its response is still delayed', asy
 
 test('the next run can be stopped while an earlier Stop response is delayed', async ({ page }) => {
   await connect(page);
-  await newConversation(page, '続けて停止');
+  await newConversation(page);
   const first = await send(page, '停止テスト');
   const { promise: held, resolve: release } = Promise.withResolvers();
   await page.route(`**/v1/runs/${first.id}/cancel`, async route => {
@@ -284,7 +539,7 @@ test('the next run can be stopped while an earlier Stop response is delayed', as
 
 test('an interrupted event stream resumes with its durable cursor without duplicate text', async ({ page }) => {
   await connect(page);
-  await newConversation(page, '接続の再開');
+  await newConversation(page);
   const cursors = [];
   let first = true;
   let deliveredCursor;
@@ -311,7 +566,7 @@ test('an interrupted event stream resumes with its durable cursor without duplic
 
 test('explicit review preserves uncertainty, shows records separately and releases the conversation', async ({ page }, testInfo) => {
   await connect(page);
-  const id = await newConversation(page, '処理の確認');
+  const id = await newConversation(page);
   const sent = await send(page, '復旧テスト');
   await expect.poll(async () => {
     const response = await page.request.get(`/v1/runs/${sent.id}/review`, { headers: auth });
@@ -348,11 +603,69 @@ test('explicit review preserves uncertainty, shows records separately and releas
   await page.screenshot({ path: testInfo.outputPath('reviewed-conversation.png'), fullPage: true });
 });
 
+test('a delayed snapshot preserves a newer outcome review', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const base = `/v1/conversations/${id}`;
+  const { promise: holdSend, resolve: releaseSend } = Promise.withResolvers();
+  const { promise: holdSnapshot, resolve: releaseSnapshot } = Promise.withResolvers();
+  const { promise: capturedSnapshot, resolve: reportSnapshot } = Promise.withResolvers();
+  await page.route(`**${base}/runs`, async route => {
+    await holdSend;
+    await route.continue();
+  });
+  try {
+    const sending = page.waitForRequest(request => request.url().endsWith(`${base}/runs`));
+    await composer(page).fill('競合するメッセージ');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await sending;
+    const winner = await page.request.post(`${base}/runs`, {
+      headers: auth,
+      data: { message: '復旧テスト', idempotency_key: 'other-client-uncertain' },
+    });
+    expect(winner.status()).toBe(202);
+    const { id: runId } = await winner.json();
+    await conversationButton(page, id).click();
+    await expect.poll(async () => {
+      const response = await page.request.get(`/v1/runs/${runId}/review`, { headers: auth });
+      return (await response.json()).tools.length;
+    }).toBe(1);
+    await page.getByRole('button', { name: '停止', exact: true }).click();
+    const inspect = page.getByRole('button', { name: '実行記録を確認', exact: true });
+    await expect(inspect).toBeVisible();
+
+    await page.route(`**${base}/snapshot`, async route => {
+      const response = await route.fetch();
+      const snapshot = await response.json();
+      expect(snapshot.runs.find(item => item.id === runId)?.reviewed_at).toBeNull();
+      reportSnapshot();
+      await holdSnapshot;
+      await route.fulfill({ response });
+    });
+    releaseSend();
+    await capturedSnapshot;
+    await inspect.click();
+    const dialog = page.getByRole('dialog', { name: '実行結果の確認', exact: true });
+    await dialog.getByLabel('確認メモ', { exact: true }).fill('実行結果を確認しました。');
+    await dialog.getByLabel('実行記録を確認しました。この処理は再実行しません。', { exact: true }).check();
+    await dialog.getByRole('button', { name: '確認して会話を続ける', exact: true }).click();
+    await expect(dialog).toBeHidden();
+
+    releaseSnapshot();
+    await expect(composer(page)).toBeEnabled();
+    await expect(inspect).toBeHidden();
+    await expect(page.locator('#chat-log')).toContainText('確認メモ：実行結果を確認しました。');
+  } finally {
+    releaseSend();
+    releaseSnapshot();
+  }
+});
+
 test('mobile drawer works with reduced motion and Japanese input stays visible', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await connect(page);
   await page.getByRole('button', { name: '会話一覧を開く', exact: true }).click();
-  await newConversation(page, 'スマートフォン');
+  await newConversation(page);
   await composer(page).fill('日本語の下書きです。');
   await expect(composer(page)).toBeInViewport();
   await page.getByRole('button', { name: '会話一覧を開く', exact: true }).click();
@@ -362,4 +675,52 @@ test('mobile drawer works with reduced motion and Japanese input stays visible',
   await expect(composer(page)).toHaveValue('日本語の下書きです。');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
   await page.screenshot({ path: testInfo.outputPath('mobile-chat.png'), fullPage: true });
+});
+
+test('an offscreen title refresh finds a conversation outside the newest list window', async ({ page }) => {
+  const createConversation = async () => {
+    const response = await page.request.post('/v1/conversations', { headers: auth, data: {} });
+    expect(response.status()).toBe(201);
+    return (await response.json()).id;
+  };
+  const id = await createConversation();
+  for (let index = 0; index < 99; index += 1) await createConversation();
+  await connect(page);
+  await expect(page.locator('#conversation-list button')).toHaveCount(100);
+  await conversationButton(page, id).click();
+  await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
+  await expect(composer(page)).toBeEnabled();
+  const path = `/v1/conversations/${id}/runs`;
+  const winner = await page.request.post(path, {
+    headers: auth,
+    data: { message: '停止テスト', idempotency_key: 'offscreen-outside-list-window' },
+  });
+  expect(winner.status()).toBe(202);
+  const { id: runId } = await winner.json();
+  const { promise: holdConflict, resolve: releaseConflict } = Promise.withResolvers();
+  await page.route(`**${path}`, async route => {
+    const response = await route.fetch();
+    expect(response.status()).toBe(409);
+    await holdConflict;
+    await route.fulfill({ response });
+  });
+  try {
+    const sending = page.waitForRequest(request => request.url().endsWith(path));
+    await composer(page).fill('競合するメッセージ');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await sending;
+    const created = await newConversation(page);
+    // The newly created conversation pushes the older one out of the server's newest 100.
+    const listed = await page.request.get('/v1/conversations', { headers: auth });
+    expect((await listed.json()).conversations.some(item => item.id === id)).toBeFalsy();
+
+    releaseConflict();
+    await expect(conversationButton(page, id)).toHaveText('停止テスト');
+    await expect(conversationButton(page, created)).toHaveAttribute('aria-current', 'page');
+    await expect(conversationTitle(page)).toHaveText('新しい会話');
+  } finally {
+    releaseConflict();
+    await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+    await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+  }
 });
