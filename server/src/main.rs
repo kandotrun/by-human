@@ -192,7 +192,10 @@ async fn serve() -> anyhow::Result<()> {
     let runner = Runner::start(store.clone(), engine, shutdown.clone()).await?;
     let fatal = runner.fatal_token();
     let state = ApiState::new(store, config.api_token, runner.notifier())
-        .map_err(|message| anyhow::anyhow!("{message}"))?;
+        .map_err(|message| anyhow::anyhow!("{message}"))?
+        .with_browser_origins(by_human::browser_session::BrowserOrigins::loopback(
+            listening_at,
+        ));
     let http_shutdown = shutdown.clone();
     let mut http = tokio::spawn(async move {
         axum::serve(listener, api::router(state))

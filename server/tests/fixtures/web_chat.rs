@@ -176,7 +176,10 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let state = ApiState::new(store, TOKEN.into(), runner.notifier())
-        .map_err(|_| anyhow::anyhow!("invalid fixture token"))?;
+        .map_err(|_| anyhow::anyhow!("invalid fixture token"))?
+        .with_browser_origins(by_human::browser_session::BrowserOrigins::loopback(
+            listener.local_addr()?,
+        ));
     let http_shutdown = shutdown.clone();
     let mut http = tokio::spawn(async move {
         axum::serve(listener, api::router(state))

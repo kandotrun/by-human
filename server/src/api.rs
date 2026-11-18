@@ -3,9 +3,12 @@
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, Path, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::{
+        HeaderMap, Method, StatusCode,
+        header::{self, AUTHORIZATION},
+    },
     middleware::{self, Next},
     response::{
         IntoResponse, Response, Sse,
@@ -13,6 +16,7 @@ use axum::{
     },
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use futures_util::TryStreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,7 +24,10 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::store::{GENERATED_TITLE_CHARS, Run, Store, StoreError};
+use crate::{
+    browser_session::{self, BrowserOrigins, CookieSecret, SessionSecret},
+    store::{GENERATED_TITLE_CHARS, Run, Store, StoreError},
+};
 
 const MAX_MESSAGE_BYTES: usize = 24 * 1024;
 const MAX_TITLE_BYTES: usize = 800;
@@ -32,6 +39,8 @@ const CHAT_SNAPSHOT_RUNS: usize = 100;
 pub struct ApiState {
     store: Store,
     bearer: Arc<str>,
+    token_fingerprint: [u8; 32],
+    browser_origins: Arc<BrowserOrigins>,
     notifier: Arc<Notify>,
 }
 
@@ -44,14 +53,23 @@ impl ApiState {
         }
         Ok(Self {
             store,
+            token_fingerprint: browser_session::token_fingerprint(&bearer),
             bearer: bearer.into(),
+            browser_origins: Arc::default(),
             notifier,
         })
+    }
+
+    /// Lets pages served at these exact origins sign in with a browser session.
+    pub fn with_browser_origins(mut self, origins: BrowserOrigins) -> Self {
+        self.browser_origins = Arc::new(origins);
+        self
     }
 }
 
 pub fn router(state: ApiState) -> Router {
     let authenticated = Router::new()
+        .route("/session", get(session_status).delete(end_session))
         .route(
             "/conversations",
             get(list_conversations).post(create_conversation),
@@ -66,10 +84,14 @@ pub fn router(state: ApiState) -> Router {
         .route("/runs/{id}/events", get(events))
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(state.clone(), authenticate));
+    // Signing in is the only `/v1` route outside the authentication layer.
+    let v1 = Router::new()
+        .route("/sessions", post(start_session))
+        .merge(authenticated);
     Router::new()
         .merge(crate::web::router())
         .route("/health", get(health))
-        .nest("/v1", authenticated)
+        .nest("/v1", v1)
         .layer(DefaultBodyLimit::max(32 * 1024))
         .layer(middleware::map_response(no_store))
         .with_state(state)
@@ -100,23 +122,117 @@ async fn no_store(mut response: Response) -> Response {
     response
 }
 
+#[derive(Clone)]
+enum Authenticated {
+    Bearer,
+    Browser {
+        secret_hash: [u8; 32],
+        expires_at: DateTime<Utc>,
+    },
+}
+
 async fn authenticate(
     State(state): State<ApiState>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let authorization = request.headers().get_all(AUTHORIZATION);
-    let mut values = authorization.iter();
-    let token = values
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    let valid = values.next().is_none()
-        && token.is_some_and(|value| bool::from(value.as_bytes().ct_eq(state.bearer.as_bytes())));
-    if !valid {
+    let context = if request.headers().contains_key(AUTHORIZATION) {
+        // An explicit bearer request never falls back to a browser session.
+        let mut values = request.headers().get_all(AUTHORIZATION).iter();
+        let token = values
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        let valid = values.next().is_none()
+            && token
+                .is_some_and(|value| bool::from(value.as_bytes().ct_eq(state.bearer.as_bytes())));
+        if !valid {
+            return Err(ApiError::unauthorized());
+        }
+        Authenticated::Bearer
+    } else {
+        let CookieSecret::Present(secret) = browser_session::read_cookie(request.headers()) else {
+            return Err(ApiError::unauthorized());
+        };
+        // SameSite=Strict blocks cross-site use. The origin check also blocks
+        // other origins on the same site from changing anything.
+        let reads_only = matches!(*request.method(), Method::GET | Method::HEAD);
+        if !reads_only && !state.browser_origins.allows(request.headers()) {
+            return Err(ApiError::origin_not_allowed());
+        }
+        let secret_hash = secret.hash();
+        let session = state
+            .store
+            .authenticate_browser_session(
+                &secret_hash,
+                &state.token_fingerprint,
+                browser_session::IDLE_LIFETIME_SECS,
+            )
+            .await?
+            .ok_or_else(ApiError::unauthorized)?;
+        Authenticated::Browser {
+            secret_hash,
+            expires_at: session.expires_at,
+        }
+    };
+    request.extensions_mut().insert(context);
+    Ok(next.run(request).await)
+}
+
+#[derive(Deserialize)]
+struct SessionRequest {
+    token: String,
+}
+
+async fn start_session(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<SessionRequest>,
+) -> Result<Response, ApiError> {
+    if !state.browser_origins.allows(&headers) {
+        return Err(ApiError::origin_not_allowed());
+    }
+    if !bool::from(input.token.as_bytes().ct_eq(state.bearer.as_bytes())) {
         return Err(ApiError::unauthorized());
     }
-    Ok(next.run(request).await)
+    let secret = SessionSecret::generate().ok_or_else(ApiError::session_unavailable)?;
+    let session = state
+        .store
+        .create_browser_session(
+            &secret.hash(),
+            &state.token_fingerprint,
+            browser_session::IDLE_LIFETIME_SECS,
+        )
+        .await?;
+    let mut response = Json(json!({"expires_at": session.expires_at})).into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, browser_session::session_cookie(&secret));
+    Ok(response)
+}
+
+async fn session_status(Extension(auth): Extension<Authenticated>) -> Json<Value> {
+    Json(match auth {
+        Authenticated::Bearer => json!({"method": "bearer", "expires_at": null}),
+        Authenticated::Browser { expires_at, .. } => {
+            json!({"method": "browser", "expires_at": expires_at})
+        }
+    })
+}
+
+async fn end_session(
+    State(state): State<ApiState>,
+    Extension(auth): Extension<Authenticated>,
+) -> Result<Response, ApiError> {
+    let Authenticated::Browser { secret_hash, .. } = auth else {
+        return Err(ApiError::bad_request("browser_session_required"));
+    };
+    state.store.revoke_browser_session(&secret_hash).await?;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, browser_session::expired_cookie());
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -391,6 +507,18 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             code,
+        }
+    }
+    fn origin_not_allowed() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "origin_not_allowed",
+        }
+    }
+    fn session_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "session_unavailable",
         }
     }
 }
