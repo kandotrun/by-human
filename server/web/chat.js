@@ -198,7 +198,7 @@ function runStatus(run) {
   if (run.status === "uncertain") return run.reviewed_at ? "結果不明・確認済み" : "実行結果の確認が必要です";
   if (run.status === "failed") return run.error_code === "CONTEXT_LIMIT_REACHED" ? "会話が長くなったため続けられません。新しい会話を作成してください。" : "返信を完了できませんでした";
   if (run.status === "cancelled") return "停止しました";
-  if (active(run)) return run.cancel_requested ? "停止を待っています" : "応答を待っています";
+  // Active work is described once, by the status pill under the title.
   return "";
 }
 
@@ -220,7 +220,11 @@ function renderMessages(forceScroll = false) {
   const log = $("chat-log");
   const fragment = document.createDocumentFragment();
   if (olderRunsOmitted) fragment.append(element("p", "message-status", "古い履歴の一部は省略されています。"));
+  let previous = null;
   for (const run of [...runs].reverse()) {
+    const sent = new Date(run.created_at);
+    if (needsSeparator(previous, sent)) fragment.append(timeSeparator(sent));
+    previous = sent;
     const turn = element("div", "turn");
     const user = element("div", "message user", run.input_text);
     user.dataset.role = "user";
@@ -231,7 +235,15 @@ function renderMessages(forceScroll = false) {
       const assistant = element("div", "message assistant");
       assistant.dataset.role = "assistant";
       assistant.dataset.runId = run.id;
-      renderReply(assistant, run.output_text);
+      if (run.output_text) renderReply(assistant, run.output_text);
+      else {
+        // Dots fill the reply until the first token; the status pill says why.
+        assistant.classList.add("waiting");
+        const typing = element("div", "typing");
+        typing.setAttribute("aria-hidden", "true");
+        typing.append(element("span"), element("span"), element("span"));
+        assistant.append(typing);
+      }
       turn.append(assistant);
       if (!active(run)) {
         const actions = element("div", "message-actions");
@@ -270,6 +282,47 @@ function renderMessages(forceScroll = false) {
   $("empty-new-chat").hidden = Boolean(selectedId);
   if (forceScroll || nearBottom) area.scrollTop = area.scrollHeight;
   else area.scrollTop = oldTop;
+  updateJumpButton();
+}
+
+// A separator opens the conversation and marks gaps of 30 minutes or a new day.
+function needsSeparator(previous, sent) {
+  if (Number.isNaN(sent.getTime())) return false;
+  return !previous || sent - previous >= 30 * 60 * 1000 || sent.toDateString() !== previous.toDateString();
+}
+
+const clock = new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" });
+const day = new Intl.DateTimeFormat("ja-JP", { month: "long", day: "numeric" });
+const fullDay = new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "long", day: "numeric" });
+
+function timeSeparator(sent) {
+  const now = new Date();
+  const time = clock.format(sent);
+  const label = sent.toDateString() === now.toDateString() ? time
+    : sent.getFullYear() === now.getFullYear() ? `${day.format(sent)} ${time}`
+      : `${fullDay.format(sent)} ${time}`;
+  const separator = element("div", "time-separator");
+  const stamp = element("time", "", label);
+  stamp.dateTime = sent.toISOString();
+  separator.append(stamp);
+  return separator;
+}
+
+function updateJumpButton() {
+  const area = $("message-area");
+  $("jump-latest").hidden = area.scrollHeight - area.scrollTop - area.clientHeight < 240;
+}
+
+function jumpToLatest() {
+  const area = $("message-area");
+  const instant = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  area.scrollTo({ top: area.scrollHeight, behavior: instant ? "auto" : "smooth" });
+}
+
+function toolLabel(name) {
+  if (name === "get_current_time") return "時刻を確認中";
+  const mcp = /^mcp_(.+)_[0-9a-f]{16}$/.exec(name ?? "");
+  return mcp ? `${mcp[1]} のツールを実行中` : "ツールを実行中";
 }
 
 function renderControls() {
@@ -282,7 +335,8 @@ function renderControls() {
   $("send").hidden = Boolean(busy);
   $("stop").hidden = !busy;
   $("stop").disabled = !signedIn || Boolean(busy?.cancel_requested) || stopping === busy?.id;
-  $("run-progress").textContent = busy ? (busy.cancel_requested ? "停止を待っています" : progress || "応答を待っています") : "";
+  $("run-progress").textContent = busy ? (busy.cancel_requested ? "停止しています" : progress || "考えています") : "";
+  $("run-progress").hidden = !busy;
   const listedTitle = conversations.find((item) => item.id === selectedId)?.title;
   $("conversation-title").textContent = currentConversation?.title ?? listedTitle ?? "会話";
   const actions = $("run-actions");
@@ -328,6 +382,7 @@ function renderStreamingReply() {
   if (!reply || !active(run)) return;
   const area = $("message-area");
   const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
+  reply.classList.remove("waiting");
   renderReply(reply, run.output_text);
   if (nearBottom) area.scrollTop = area.scrollHeight;
 }
@@ -758,7 +813,7 @@ async function startStream(id, captured) {
       if (!valid()) return;
       if (response.status === 401) { disconnect(SIGNED_OUT); return; }
       if (!response.ok || !response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream") || !response.body) throw new Error("stream");
-      progress = "応答を待っています";
+      progress = "考えています";
       renderControls();
       await readEvents(response.body, controller.signal, (record) => {
         if (!valid()) return;
@@ -780,8 +835,8 @@ async function startStream(id, captured) {
             progress = "応答中";
             scheduleStreamingRender(run);
           }
-        } else if (record.event === "tool.started") progress = "ツールを実行中";
-        else if (record.event === "tool.completed") progress = "応答を準備中";
+        } else if (record.event === "tool.started") progress = toolLabel(data.name);
+        else if (record.event === "tool.completed") progress = "考えています";
         else if (record.event === "run.cancel_requested") run.cancel_requested = true;
         cursor = seq;
         attempts = 0;
@@ -969,6 +1024,8 @@ $("message").addEventListener("keydown", (event) => {
 });
 $("stop").addEventListener("click", stop);
 $("chat-log").addEventListener("click", copyFromLog);
+$("message-area").addEventListener("scroll", updateJumpButton, { passive: true });
+$("jump-latest").addEventListener("click", jumpToLatest);
 $("open-sidebar").addEventListener("click", () => setDrawer(true));
 $("close-sidebar").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });
 $("drawer-backdrop").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });

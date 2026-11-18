@@ -942,3 +942,61 @@ test('the first streamed text updates only the reply in progress', async ({ page
   await page.getByRole('button', { name: '停止', exact: true }).click();
   await expect.poll(async () => (await run(page, sent.id)).status).toBe('cancelled');
 });
+
+test('a status pill and typing dots show what the agent is doing', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const tool = await send(page, '復旧テスト');
+  await expect(page.locator('#run-progress')).toHaveText('ツールを実行中');
+  await expect(page.locator('#chat-log .typing')).toBeVisible();
+  await page.getByRole('button', { name: '停止', exact: true }).click();
+  await expect.poll(async () => (await run(page, tool.id)).status).toBe('uncertain');
+  await expect(page.locator('#run-progress')).toBeHidden();
+  await expect(page.locator('#chat-log .typing')).toHaveCount(0);
+
+  await newConversation(page);
+  const streaming = await send(page, '停止テスト');
+  await expect(page.locator('#run-progress')).toHaveText('応答中');
+  await expect(page.locator('#chat-log .typing')).toHaveCount(0);
+  await page.getByRole('button', { name: '停止', exact: true }).click();
+  await expect.poll(async () => (await run(page, streaming.id)).status).toBe('cancelled');
+  await expect(page.locator('#run-progress')).toBeHidden();
+});
+
+test('time separators label turns and a jump button returns to the latest reply', async ({ page }) => {
+  await page.clock.setFixedTime(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000));
+  await page.setViewportSize({ width: 1280, height: 520 });
+  await connect(page);
+  await newConversation(page);
+  for (let index = 0; index < 3; index += 1) {
+    const sent = await send(page, 'Markdownテスト');
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  }
+  const separators = page.locator('#chat-log .time-separator');
+  await expect(separators).toHaveCount(1);
+  await expect(separators.first()).toHaveText(/^\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/);
+  const area = page.locator('#message-area');
+  const jump = page.getByRole('button', { name: '最新のメッセージへ移動', exact: true });
+  await expect(jump).toBeHidden();
+  await area.evaluate(node => { node.scrollTop = 0; });
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expect.poll(() => area.evaluate(node => node.scrollHeight - node.scrollTop - node.clientHeight)).toBeLessThan(100);
+  await expect(jump).toBeHidden();
+});
+
+test('the chat follows the system dark theme', async ({ page }) => {
+  const canvas = () => page.evaluate(() => {
+    const [red, green, blue, alpha = 1] = getComputedStyle(document.documentElement).backgroundColor.match(/[\d.]+/g).map(Number);
+    return { brightest: Math.max(red, green, blue), darkest: Math.min(red, green, blue), alpha };
+  });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await connect(page);
+  const dark = await canvas();
+  expect(dark.alpha).toBe(1);
+  expect(dark.brightest).toBeLessThan(60);
+  await page.emulateMedia({ colorScheme: 'light' });
+  const light = await canvas();
+  expect(light.alpha).toBe(1);
+  expect(light.darkest).toBeGreaterThan(200);
+});
