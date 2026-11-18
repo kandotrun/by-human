@@ -2029,7 +2029,10 @@ test.describe('on a phone', () => {
     await expect.poll(shellHeight).toBe(500);
     expect(await page.evaluate(() => window.innerHeight)).toBe(852);
     await expect(page.locator('html')).toHaveClass(/keyboard-open/);
-    // A small phone can leave less than the 320px desktop minimum visible.
+    // A small phone can leave less than the 320px desktop minimum visible,
+    // with a draft of several lines from Return.
+    await expect(composer(page)).toBeEnabled();
+    await composer(page).fill(Array.from({ length: 12 }, (_, line) => `行${line + 1}`).join('\n'));
     await page.evaluate(() => window.showKeyboard(250));
     const send = await page.getByRole('button', { name: '送信', exact: true }).boundingBox();
     expect(send.y + send.height).toBeLessThanOrEqual(250);
