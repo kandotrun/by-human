@@ -58,6 +58,9 @@ let focusAfterDelete = "";
 const drafts = new Map();
 const outbox = new Map();
 const sending = new Map();
+// Conversations this tab found deleted; a delayed create response cannot list
+// one again.
+const forgotten = new Set();
 const isSending = () => sending.has(selectedId);
 
 class ApiError extends Error {
@@ -402,6 +405,7 @@ function deleted(id, notice = false) {
 // Drops a deleted conversation and this tab's draft and pending text for it.
 function forgetConversation(id, notice = false) {
   listGeneration += 1;
+  forgotten.add(id);
   conversations = conversations.filter((item) => item.id !== id);
   drafts.delete(id);
   outbox.delete(id);
@@ -793,6 +797,7 @@ function disconnect(message = "") {
   closeMenu();
   for (const dialog of ["rename-dialog", "delete-dialog"]) if ($(dialog).open) $(dialog).close();
   sending.clear();
+  forgotten.clear();
   signedIn = false;
   signingOut = false;
   listed = false;
@@ -906,7 +911,7 @@ async function createConversation() {
   renderSidebar();
   try {
     const result = await api("/conversations", { method: "POST", body: {} });
-    if (captured.connection !== connection || !signedIn) return;
+    if (captured.connection !== connection || !signedIn || forgotten.has(result.id)) return;
     listGeneration += 1;
     // A list reload can already include it.
     if (!conversations.some((item) => item.id === result.id)) conversations.unshift(result);

@@ -1591,3 +1591,37 @@ test('a list reload during creation keeps one row for the new conversation', asy
     release();
   }
 });
+
+test('a conversation deleted before its creation response arrives stays deleted', async ({ page }) => {
+  await connect(page);
+  const other = await newConversation(page);
+  await newConversation(page);
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  const { promise: committed, resolve: reportCommitted } = Promise.withResolvers();
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const response = await route.fetch();
+    reportCommitted((await response.json()).id);
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
+    await newChat(page).click();
+    const id = await committed;
+    await conversationButton(page, other).click();
+    await expect(composer(page)).toBeEnabled();
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await expect(conversationButton(page, id)).toHaveCount(1);
+    await openMenu(page, id, '削除');
+    await deleteDialog(page).getByRole('button', { name: '削除', exact: true }).click();
+    await expect(deleteDialog(page)).toBeHidden();
+    await expect(conversationButton(page, id)).toHaveCount(0);
+    release();
+    // New Chat turns on again once the creation response has been handled.
+    await expect(newChat(page)).toBeEnabled();
+    await expect(conversationButton(page, id)).toHaveCount(0);
+    await expect(conversationButton(page, other)).toHaveAttribute('aria-current', 'page');
+  } finally {
+    release();
+  }
+});
