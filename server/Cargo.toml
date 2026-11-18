@@ -9,6 +9,12 @@ autotests = false
 [features]
 postgres-tests = []
 mcp-test-fixture = []
+web-test-fixture = []
+
+[[bin]]
+name = "by-human-web-fixture"
+path = "tests/fixtures/web_chat.rs"
+required-features = ["web-test-fixture"]
 
 [[bin]]
 name = "by-human-mcp-fixture"

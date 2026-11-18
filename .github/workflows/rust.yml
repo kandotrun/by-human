@@ -6,6 +6,7 @@ on:
       - 'server/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'web-tests/**'
       - '.github/workflows/rust.yml'
   push:
     branches: [main, 'feat/**']
@@ -13,6 +14,7 @@ on:
       - 'server/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'web-tests/**'
       - '.github/workflows/rust.yml'
 
 permissions:
@@ -47,3 +49,22 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web-tests/package-lock.json
+      - run: npm ci
+        working-directory: web-tests
+      - run: npx playwright install --with-deps chromium
+        working-directory: web-tests
+      - name: Install Japanese fonts
+        run: sudo apt-get install -y fonts-noto-cjk fonts-noto-color-emoji
+      - run: npm test
+        working-directory: web-tests
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-test-results
+          path: web-tests/test-results/
+          retention-days: 7

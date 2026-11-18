@@ -14,16 +14,19 @@ and run storage, an authenticated HTTP API, streamed text, a bounded model/tool
 loop, Stop, durable event replay and conservative restart recovery. The initial
 tool reads the current UTC time. Owner-configured MCP tools can be added through
 stdio or Streamable HTTP, with explicit tool selection and durable receipts.
-This is an initial backend, not feature
-parity with OpenClaw or a measured performance claim.
+An embedded browser client supports chat, Stop and explicit review of uncertain
+work. This initial runtime does not claim feature parity with OpenClaw or a
+measured performance improvement.
 
 ChatGPTプランでの独自ログイン、会話・実行状態の保存、HTTP API、テキスト配信、
 停止、イベント再取得、再起動後の復旧を実装しています。時刻取得に加え、設定した
 MCPサーバーのツールをstdio／Streamable HTTPで接続できます。
+同じサーバーから配信するWeb画面で、会話・停止・結果不明の実行の確認もできます。
 OpenClawの全面置換や性能改善の実証は、今後の接続・運用検証として扱います。
 
 See [architecture](docs/architecture.md), [login](docs/openai-login.md) and
-[HTTP API](docs/http-api.md) and [MCP tools](docs/mcp.md) for the current behavior and limits.
+[HTTP API](docs/http-api.md), [MCP tools](docs/mcp.md) and
+[browser chat](docs/web-chat.md) for the current behavior and limits.
 
 ## Development
 
@@ -56,6 +59,12 @@ billing is an explicit opt-in with `BY_HUMAN_OPENAI_AUTH=api-key`.
 ChatGPT credentials are stored in the dedicated owner-only `~/.config/by-human`
 directory; they are never read from another application.
 
+Open `http://127.0.0.1:4310/` to use the embedded chat client. Enter the server
+token, then create or select a conversation. The browser supports streamed
+replies, Stop and explicit review of uncertain work. No separate frontend build
+or server is required. See [browser chat](docs/web-chat.md) for tab storage and
+recovery behavior.
+
 同じPCのブラウザでログインした後、OpenAI認証とは別のサーバー用トークンを
 `BY_HUMAN_API_TOKEN`で渡し、`serve`を実行します。APIキーへの自動切替はありません。
 認証情報は専用の`~/.config/by-human`へ保存します。
@@ -72,6 +81,19 @@ OpenClaw, Every or Mukumo service.
 
 `postgres-tests`を有効にした試験には`DATABASE_URL`が必要です。
 生成した試験用schemaで実際のPostgreSQLを使い、既存サービスへ接続しません。
+
+Browser contracts use the same Rust API/runner with a synthetic provider and an
+isolated generated PostgreSQL schema. Node.js is needed only for these tests:
+
+```sh
+cd web-tests
+npm ci
+npx playwright install chromium
+npm test
+```
+
+Keep the isolated `DATABASE_URL` exported. The browser fixture binds loopback
+port 43219 and is not part of a normal application build.
 
 ## Earlier experiments
 

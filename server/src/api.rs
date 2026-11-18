@@ -13,6 +13,7 @@ use axum::{
     },
     routing::{get, post},
 };
+use futures_util::TryStreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
@@ -24,6 +25,8 @@ use crate::store::{Run, Store, StoreError};
 const MAX_MESSAGE_BYTES: usize = 24 * 1024;
 const MAX_TITLE_BYTES: usize = 800;
 const MAX_KEY_BYTES: usize = 128;
+const CHAT_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+const CHAT_SNAPSHOT_RUNS: usize = 100;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -54,13 +57,17 @@ pub fn router(state: ApiState) -> Router {
             get(list_conversations).post(create_conversation),
         )
         .route("/conversations/{id}", get(get_conversation))
+        .route("/conversations/{id}/snapshot", get(chat_snapshot))
         .route("/conversations/{id}/runs", post(enqueue))
         .route("/runs/{id}", get(get_run))
         .route("/runs/{id}/cancel", post(cancel_run))
+        .route("/runs/{id}/review", get(review_run))
+        .route("/runs/{id}/resolve", post(resolve_run))
         .route("/runs/{id}/events", get(events))
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(state.clone(), authenticate));
     Router::new()
+        .merge(crate::web::router())
         .route("/health", get(health))
         .nest("/v1", authenticated)
         .layer(DefaultBodyLimit::max(32 * 1024))
@@ -145,6 +152,36 @@ async fn get_conversation(
     ))
 }
 
+async fn chat_snapshot(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let conversation = state.store.get_conversation(id).await?;
+    let mut snapshot =
+        json!({"conversation": conversation, "runs": [], "older_runs_omitted": false});
+    let mut bytes = serde_json::to_vec(&snapshot)
+        .map_err(|_| StoreError::Storage)?
+        .len();
+    let mut rows = std::pin::pin!(state.store.recent_runs(id, CHAT_SNAPSHOT_RUNS as i64 + 1));
+    let mut runs = Vec::new();
+    while let Some(run) = rows.try_next().await? {
+        let run = public_run(&run);
+        // Count the escaped JSON sent on the wire, including separators and
+        // the envelope. Keep a contiguous newest window and the latest run.
+        bytes += serde_json::to_vec(&run)
+            .map_err(|_| StoreError::Storage)?
+            .len()
+            + usize::from(!runs.is_empty());
+        if bytes > CHAT_SNAPSHOT_BYTES || runs.len() == CHAT_SNAPSHOT_RUNS {
+            snapshot["older_runs_omitted"] = json!(true);
+            break;
+        }
+        runs.push(run);
+    }
+    snapshot["runs"] = Value::Array(runs);
+    Ok(Json(snapshot))
+}
+
 #[derive(Deserialize)]
 struct NewRun {
     message: String,
@@ -193,6 +230,39 @@ async fn cancel_run(
 ) -> Result<Json<Value>, ApiError> {
     let run = state.store.request_cancel(id).await?;
     state.notifier.notify_one();
+    Ok(Json(json!({"run": public_run(&run)})))
+}
+
+async fn review_run(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let run = state.store.get_run(id).await?;
+    let tools = state.store.list_tools(id).await?;
+    Ok(Json(json!({"run": public_run(&run), "tools": tools})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutcomeReview {
+    note: String,
+    expected_event_seq: i64,
+    acknowledge_unknown: bool,
+}
+
+async fn resolve_run(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<OutcomeReview>,
+) -> Result<Json<Value>, ApiError> {
+    nonempty(&input.note, 4096)?;
+    if !input.acknowledge_unknown || input.expected_event_seq < 0 {
+        return Err(ApiError::bad_request("invalid_outcome_review"));
+    }
+    let run = state
+        .store
+        .resolve_uncertain(id, input.expected_event_seq, &input.note)
+        .await?;
     Ok(Json(json!({"run": public_run(&run)})))
 }
 
@@ -275,10 +345,12 @@ fn nonempty(value: &str, max_bytes: usize) -> Result<(), ApiError> {
 fn public_run(run: &Run) -> Value {
     json!({
         "id":run.id,"conversation_id":run.conversation_id,"status":run.status,
+        "idempotency_key":run.idempotency_key,
         "input_text":run.input_text,"output_text":run.output_text,
         "cancel_requested":run.cancel_requested,"error_code":run.error_code,
         "event_seq":run.event_seq,"created_at":run.created_at,
         "started_at":run.started_at,"finished_at":run.finished_at,
+        "reviewed_at":run.reviewed_at,"review_note":run.review_note,
     })
 }
 

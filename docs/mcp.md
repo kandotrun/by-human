@@ -67,7 +67,8 @@ does not prove that a remote operation stopped. If a call times out, disconnects
 or is interrupted after dispatch without a definitive result, its durable run
 becomes `uncertain`; it is not blindly replayed or declared completed. As in the
 initial backend, uncertain work blocks new input in that conversation until its
-outcome is reviewed; a reconciliation UI is not implemented yet.
+outcome is reviewed. The [browser client](web-chat.md) now exposes explicit
+inspection and acknowledgment with an owner note, without replaying the tool.
 
 ## 日本語
 
