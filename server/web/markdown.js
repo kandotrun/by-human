@@ -14,12 +14,15 @@ const ESCAPED = /\\([!-/:-@[-`{-~])/g;
 const WHITESPACE = /\s/;
 const WORD = /[\p{L}\p{N}]/u;
 const ASCII_ALNUM = /[A-Za-z0-9]/;
-const FENCE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+// [\s\S]* (not .*) consumes U+2028 and U+2029, so no split is ever retried.
+const FENCE = /^( {0,3})(`{3,}|~{3,})([\s\S]*)$/;
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/;
-const QUOTE = /^ {0,3}> ?(.*)$/;
-const ITEM = /^( {0,3})(?:([-+*])|(\d{1,9})([.)]))(?:([ \t]+)(.*))?$/;
+const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+([\s\S]*))?$/;
+const QUOTE = /^ {0,3}> ?([\s\S]*)$/;
+const ITEM = /^( {0,3})(?:([-+*])|(\d{1,9})([.)]))(?:([ \t]+)([\s\S]*))?$/;
 const TASK = /^\[([ xX])\](?:[ \t]+|$)/;
+// A list item or quote marker at a sticky position, stripped before tracking blocks.
+const CONTAINER_MARKER = /(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)|>[ \t]?/y;
 // Characters that end a bare URL: whitespace, markup and CJK punctuation.
 const URL_STOP = new Set([..."<>\"'`、。，．！？：；「」『』（）【】〈〉《》〔〕［］｛｝…‥・　"]);
 const URL_TRAILING = new Set([..."?!.,:;*_~'\")]}"]);
@@ -230,26 +233,49 @@ function parseList(lines, start, first, depth) {
     if (!item || item.ordered !== first.ordered || item.marker !== first.marker || isThematicBreak(lines[index])) break;
     const body = [];
     let fenceOpen = "";
+    let tableOpen = false;
     let paragraphOpen = false;
-    // Fences are tracked at any indentation, so a fence in a nested item also
-    // stops lazy continuation of this one.
+    let previous = "";
+    // Lazy continuation is allowed only while the innermost open block is a
+    // paragraph. Fences and tables are tracked through nested item and quote
+    // markers, so a block opened in a nested item also stops it.
     const add = (content) => {
       body.push(content);
-      const trimmed = trimLine(content);
-      const marker = /^(`{3,}|~{3,})/.exec(trimmed);
+      let inner = trimLine(content);
+      if (isThematicBreak(inner)) {
+        fenceOpen = "";
+        tableOpen = false;
+        paragraphOpen = false;
+        previous = "";
+        return;
+      }
+      let offset = 0;
+      for (;;) {
+        CONTAINER_MARKER.lastIndex = offset;
+        const marker = CONTAINER_MARKER.exec(inner);
+        if (!marker || !marker[0]) break;
+        offset = CONTAINER_MARKER.lastIndex;
+      }
+      inner = inner.slice(offset);
+      const fence = /^(`{3,}|~{3,})/.exec(inner);
       if (fenceOpen) {
-        if (marker && marker[1][0] === fenceOpen[0] && marker[1].length >= fenceOpen.length && trimmed.length === marker[1].length) fenceOpen = "";
+        if (fence && fence[1][0] === fenceOpen[0] && fence[1].length >= fenceOpen.length && trimLine(inner).length === fence[1].length) fenceOpen = "";
         paragraphOpen = false;
-        return;
-      }
-      if (marker && !(marker[1][0] === "`" && trimmed.slice(marker[1].length).includes("`"))) {
-        fenceOpen = marker[1];
+      } else if (fence && !(fence[1][0] === "`" && inner.slice(fence[1].length).includes("`"))) {
+        fenceOpen = fence[1];
+        tableOpen = false;
         paragraphOpen = false;
-        return;
+      } else if (inner === "") {
+        tableOpen = false;
+        paragraphOpen = false;
+      } else if (tableOpen || (previous.includes("|") && delimiterRow(inner))) {
+        // Table rows continue without pipes until a blank line.
+        tableOpen = true;
+        paragraphOpen = false;
+      } else {
+        paragraphOpen = !HEADING.test(inner);
       }
-      // Only plain paragraph text may absorb an outdented line; a table row or
-      // another block would swallow it.
-      paragraphOpen = trimmed !== "" && !HEADING.test(trimmed) && !isThematicBreak(trimmed) && !trimmed.includes("|") && !QUOTE.test(trimmed);
+      previous = inner;
     };
     add(item.rest);
     let next = index + 1;
@@ -520,19 +546,23 @@ const AUTHORITY = /[A-Za-z0-9.:@%[\]_-]/;
 function bareUrlEnd(text, start) {
   const head = text.slice(start, start + 8).toLowerCase();
   if (!head.startsWith("http://") && !head.startsWith("https://")) return 0;
-  // A URL wrapped in emphasis (**https://...**) ends at the closing delimiter.
-  const wrapper = "*_~".includes(text[start - 1] ?? "") ? text[start - 1] : "";
-  // Underscores are common in paths, so only one that can close ends the URL.
-  const closesWrapper = (at) => text[at] === wrapper && (wrapper !== "_" || !WORD.test(text[at + 1] ?? " "));
+  // A URL wrapped in * or ~ emphasis (**https://...**) ends at that delimiter.
+  // Underscores are common in paths, so an `_` wrapper is left to the
+  // trailing-punctuation trim below.
+  const wrapper = "*~".includes(text[start - 1] ?? "") ? text[start - 1] : "";
   let end = start + head.indexOf("//") + 2;
   // The host is ASCII, so Japanese text or markup right after it is not part of it.
   while (end < text.length && AUTHORITY.test(text[end])) end += 1;
-  // An invalid host is rejected before its path is read, so repeats stay linear.
-  if (!safeHref(text.slice(start, end))) return 0;
+  // An invalid host is rejected before its path is read, so repeats stay
+  // linear. Trailing punctuation (`:8443.` or `]`) is trimmed before deciding.
+  let host = end;
+  while (host > start && URL_TRAILING.has(text[host - 1])) host -= 1;
+  if (!safeHref(text.slice(start, end)) && !safeHref(text.slice(start, host))) return 0;
   let opens = 0;
   let closes = 0;
   if ("/?#".includes(text[end] ?? " ")) {
-    while (end < text.length && !URL_STOP.has(text[end]) && !WHITESPACE.test(text[end]) && !closesWrapper(end)) {
+    // Controls end the URL too, since safeHref would reject them after a full scan.
+    while (end < text.length && !URL_STOP.has(text[end]) && !WHITESPACE.test(text[end]) && text[end] !== wrapper && text.charCodeAt(end) > 0x1f && text.charCodeAt(end) !== 0x7f) {
       if (text[end] === "(") opens += 1;
       else if (text[end] === ")") closes += 1;
       end += 1;
@@ -660,7 +690,7 @@ function matchEmphasis(tokens) {
   // After a closer finds nothing, later closers of the same delimiter, length
   // class and openness skip the openers it already rejected (CommonMark's
   // openers_bottom), so mismatched runs are never rescanned.
-  const bottom = new Map();
+  const bottom = new Map(); // closer class -> highest token position already rejected
   tokens.forEach((token, position) => {
     if (token.type !== "delim") return;
     const stack = stacks[token.char];
@@ -668,7 +698,8 @@ function matchEmphasis(tokens) {
     if (token.canClose) {
       while (token.remaining > 0) {
         let found = -1;
-        for (let index = stack.length - 1; index >= Math.min(bottom.get(key) ?? 0, stack.length); index -= 1) {
+        const floor = bottom.get(key) ?? -1;
+        for (let index = stack.length - 1; index >= 0 && stack[index] > floor; index -= 1) {
           const opener = tokens[stack[index]];
           if (token.char === "~" && (opener.remaining !== 2 || token.remaining !== 2)) continue;
           const sum = opener.count + token.count;
@@ -677,7 +708,7 @@ function matchEmphasis(tokens) {
           break;
         }
         if (found < 0) {
-          bottom.set(key, stack.length);
+          bottom.set(key, stack.length ? stack[stack.length - 1] : -1);
           break;
         }
         const openerPosition = stack[found];

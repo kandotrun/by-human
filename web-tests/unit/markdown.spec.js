@@ -111,6 +111,14 @@ test('code paths, fences in lists, URLs in emphasis and table escapes', async ({
   expect(await html(page, '- a\n  - b\n    ```\n    code\nOutside')).toBe('<ul><li>a<ul><li>b' + code('', 'code') + '</li></ul></li></ul><p>Outside</p>');
   expect(await html(page, '_https://example.com/my_page_')).toBe(`<p><em>${link('https://example.com/my_page', 'https://example.com/my_page')}</em></p>`);
   expect(await html(page, '[broken](oops[Email](mailto:team@example.com)')).toBe(`<p>[broken](oops${link('mailto:team@example.com', 'Email')}</p>`);
+  expect(await html(page, '- item\n  | col |\n  | --- |\n  Alice\nOutside')).toBe(
+    '<ul><li>item<div class="table-scroll"><table><thead><tr><th>col</th></tr></thead><tbody><tr><td>Alice</td></tr></tbody></table></div></li></ul><p>Outside</p>');
+  expect(await html(page, '- a\n  - ```\n    code\nOutside')).toBe('<ul><li>a<ul><li>' + code('', 'code') + '</li></ul></li></ul><p>Outside</p>');
+  expect(await html(page, '- a | b\ncontinued')).toBe('<ul><li>a | b<br>continued</li></ul>');
+  expect(await html(page, '_https://example.com/folder_/page_')).toBe(`<p><em>${link('https://example.com/folder_/page', 'https://example.com/folder_/page')}</em></p>`);
+  expect(await html(page, '*a**b* **word**x')).toBe('<p><em>a**b</em> <strong>word</strong>x</p>');
+  expect(await html(page, 'https://example.com:8443. と [https://example.com]')).toBe(
+    `<p>${link('https://example.com:8443', 'https://example.com:8443')}. と [${link('https://example.com', 'https://example.com')}]</p>`);
 });
 
 test('hostile input never creates active content', async ({ page }) => {
@@ -193,6 +201,10 @@ test('pathological replies render quickly', async ({ page }) => {
       longRuns: '*'.repeat(400_000) + 'x' + '*'.repeat(400_000),
       angleLinks: '[a](<'.repeat(30_000),
       badAuthorities: 'http://[/.'.repeat(30_000),
+      controlPaths: 'https://a.test/'.repeat(30_000) + '\x01',
+      headingSeparator: '- a\n      #' + ' '.repeat(64_000) + '\u2028x\nOutside',
+      itemSeparator: '-' + ' '.repeat(64_000) + '\u2028x',
+      fenceSeparator: '`'.repeat(64_000) + '\u2028x',
     };
     return Object.fromEntries(Object.entries(inputs).map(([name, text]) => {
       const started = performance.now();
