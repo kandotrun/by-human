@@ -5,8 +5,9 @@
   --sidebar: #f3f2ef;
   --hover: #ebe9e4;
   --ink: #1f2328;
-  --muted: #6b7078;
+  --muted: #5f646c;
   --line: #e6e3dd;
+  --field-line: #878b91;
   --accent: #c2410c;
   --accent-vivid: #f76707;
   --accent-ink: #ffffff;
@@ -18,8 +19,8 @@
   --warning: #7a5a00;
   --warning-soft: #fdf3e4;
   --danger: #b42f3d;
-  --focus: #f59a5b;
-  --placeholder: #8d929a;
+  --focus: #e8590c;
+  --placeholder: #6c7179;
   --disabled: #b4b8be;
   --shadow: #1f23280f;
   --busy: #f76707;
@@ -38,6 +39,7 @@
     --ink: #e7e8ea;
     --muted: #9da1a8;
     --line: #2d3035;
+    --field-line: #6b6f76;
     --accent: #ffa94d;
     --accent-vivid: #ff922b;
     --accent-ink: #231205;
@@ -51,11 +53,10 @@
     --warning: #e3c16f;
     --warning-soft: #33271a;
     --danger: #ff8a93;
-    --placeholder: #7c8088;
+    --placeholder: #85898f;
     --disabled: #4a4d53;
     --shadow: #00000040;
   }
-  dialog::backdrop { background: #000000a6; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; }
@@ -123,6 +124,7 @@ button { color: inherit; }
 .markdown a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
 .markdown code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em; }
 .markdown :not(pre) > code { padding: .1em .35em; border-radius: 6px; background: var(--code-inline); overflow-wrap: anywhere; }
+.markdown a code { background: var(--accent-soft); }
 .code-block { border: 1px solid var(--line); border-radius: 12px; background: var(--code-surface); overflow: hidden; line-height: 1.6; }
 .code-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 6px 4px 14px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 .code-block pre { margin: 0; padding: 12px 14px; overflow-x: auto; white-space: pre; }
@@ -144,7 +146,7 @@ button { color: inherit; }
 .composer-region { position: relative; width: 100%; max-width: 840px; align-self: center; padding: 8px 32px max(16px, env(safe-area-inset-bottom)); }
 .jump-latest { position: absolute; top: -46px; left: 50%; transform: translateX(-50%); z-index: 2; width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--ink); box-shadow: 0 6px 18px var(--shadow); font-size: 18px; line-height: 1; }
 .composer { display: flex; align-items: flex-end; gap: 12px; padding: 10px 10px 10px 17px; border: 1px solid var(--line); border-radius: 24px; background: var(--surface); box-shadow: 0 6px 24px var(--shadow); }
-.composer:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.composer:focus-within { border-color: var(--focus); }
 .composer textarea { width: 100%; resize: none; border: 0; outline: none; background: transparent; color: var(--ink); padding: 6px 0; min-height: 38px; max-height: min(30dvh, 220px); line-height: 1.6; overflow-y: auto; }
 .composer textarea:focus-visible { outline: none; }
 textarea::placeholder, input::placeholder { color: var(--placeholder); }
@@ -167,11 +169,12 @@ textarea::placeholder, input::placeholder { color: var(--placeholder); }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; background: transparent; border: 1px solid var(--line); border-radius: 50%; font-size: 22px; line-height: 1; flex-shrink: 0; }
 dialog { width: min(440px, calc(100% - 32px)); max-height: calc(100dvh - 36px); overflow-y: auto; border: 1px solid var(--line); border-radius: 20px; padding: 0; background: var(--surface); color: var(--ink); box-shadow: 0 20px 100px #10203c26; }
 dialog::backdrop { background: #172a444d; backdrop-filter: blur(4px); }
+@media (prefers-color-scheme: dark) { dialog::backdrop { background: #000000a6; } }
 .dialog-content { padding: 28px; }
 .dialog-content h2 { font-size: 21px; font-weight: 600; letter-spacing: -.5px; margin: 0 0 13px; }
 .dialog-content p { color: var(--muted); font-size: 13px; margin: 0 0 19px; }
 .dialog-content label:not(.checkbox-label) { display: block; font-size: 13px; margin: 0 0 7px; font-weight: 550; }
-.dialog-content input:not([type="checkbox"]), .dialog-content textarea { width: 100%; min-height: 45px; padding: 9px 11px; color: var(--ink); background: var(--canvas); border: 1px solid var(--line); border-radius: 9px; }
+.dialog-content input:not([type="checkbox"]), .dialog-content textarea { width: 100%; min-height: 45px; padding: 9px 11px; color: var(--ink); background: var(--canvas); border: 1px solid var(--field-line); border-radius: 9px; }
 .dialog-content textarea { resize: vertical; max-height: 30dvh; }
 .dialog-content .field-note { font-size: 11px; margin-top: 10px; }
 .dialog-content .form-error { color: var(--danger); font-size: 12px; margin: 12px 0; }

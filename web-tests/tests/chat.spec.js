@@ -1072,12 +1072,19 @@ test('streamed text below the reader offers the jump button without moving them'
 });
 
 test('the chat follows the system dark theme', async ({ page }) => {
-  const canvas = () => page.evaluate(() => {
-    const [red, green, blue, alpha = 1] = getComputedStyle(document.documentElement).backgroundColor.match(/[\d.]+/g).map(Number);
+  const shade = (locator, pseudo) => locator.evaluate((node, pseudo) => {
+    const [red, green, blue, alpha = 1] = getComputedStyle(node, pseudo).backgroundColor.match(/[\d.]+/g).map(Number);
     return { brightest: Math.max(red, green, blue), darkest: Math.min(red, green, blue), alpha };
-  });
+  }, pseudo);
+  const canvas = () => shade(page.locator('html'));
   await page.emulateMedia({ colorScheme: 'dark' });
-  await connect(page);
+  await page.goto('/');
+  await expect(signInDialog(page)).toBeVisible();
+  // Dialogs dim the dark page with a dark backdrop.
+  const backdrop = await shade(signInDialog(page), '::backdrop');
+  expect(backdrop.brightest).toBeLessThan(30);
+  expect(backdrop.alpha).toBeGreaterThan(0.5);
+  await connect(page, false);
   const dark = await canvas();
   expect(dark.alpha).toBe(1);
   expect(dark.brightest).toBeLessThan(60);
@@ -1085,4 +1092,82 @@ test('the chat follows the system dark theme', async ({ page }) => {
   const light = await canvas();
   expect(light.alpha).toBe(1);
   expect(light.darkest).toBeGreaterThan(200);
+});
+
+test('text and controls keep WCAG contrast in light and dark themes', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  // A reply with a quote, quoted code, a link and linked code, from the real renderer.
+  await page.evaluate(async () => {
+    const { renderMarkdown } = await import('/markdown.js');
+    const reply = document.createElement('div');
+    reply.className = 'message assistant markdown';
+    reply.dataset.contrastSample = '';
+    reply.append(renderMarkdown('> 引用と `引用内のコード`\n\n[リンク](https://example.com) と [`リンクのコード`](https://example.com)'));
+    document.getElementById('chat-log').append(reply);
+  });
+  // After a key press, programmatic focus shows the keyboard focus ring.
+  await page.keyboard.press('Shift');
+  const failures = () => page.evaluate(() => {
+    const $ = selector => document.querySelector(selector);
+    const channels = color => {
+      const srgb = /^color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)(?: \/ ([\d.]+))?\)$/.exec(color);
+      if (srgb) return [...srgb.slice(1, 4).map(value => Number(value) * 255), Number(srgb[4] ?? 1)];
+      const [red, green, blue, alpha = 1] = color.match(/[\d.]+/g).map(Number);
+      return [red, green, blue, alpha];
+    };
+    const luminance = color => {
+      const [red, green, blue, alpha] = channels(color);
+      if (alpha !== 1) throw new Error(`translucent colour ${color}`);
+      const [r, g, b] = [red, green, blue].map(value => {
+        const channel = value / 255;
+        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const ratio = (first, second) => {
+      const [lighter, darker] = [luminance(first), luminance(second)].sort((a, b) => b - a);
+      return (lighter + 0.05) / (darker + 0.05);
+    };
+    // Text and edges sit on the first opaque background at or above them.
+    const backdrop = node => {
+      for (let current = node; current; current = current.parentElement) {
+        const color = getComputedStyle(current).backgroundColor;
+        if (channels(color)[3] > 0) return color;
+      }
+      throw new Error('no opaque background');
+    };
+    const sample = $('[data-contrast-sample]');
+    const text = (name, node, pseudo = null) => [name, getComputedStyle(node, pseudo).color, backdrop(node), 4.5];
+    $('#message').focus();
+    const composerEdge = getComputedStyle($('.composer')).borderTopColor;
+    $('#new-chat').focus();
+    if (!$('#new-chat').matches(':focus-visible')) throw new Error('the focus ring is not shown');
+    const ring = getComputedStyle($('#new-chat')).outlineColor;
+    const fieldEdge = getComputedStyle($('#server-token')).borderTopColor;
+    const surfaces = [['canvas', document.documentElement], ['sidebar', $('.sidebar')], ['surface', $('.composer')], ['reply', sample]];
+    const pairs = [
+      text('composer placeholder', $('#message'), '::placeholder'),
+      text('review note placeholder', $('#review-note'), '::placeholder'),
+      text('sidebar status', $('#connection-state')),
+      text('sidebar storage link', $('#storage-info')),
+      text('composer caption', $('.composer-caption span')),
+      text('quote', sample.querySelector('blockquote p')),
+      text('quoted code', sample.querySelector('blockquote code')),
+      text('link', sample.querySelector('a')),
+      text('linked code', sample.querySelector('a code')),
+      // Focus indicators and field edges need 3:1 against what they touch.
+      ...surfaces.map(([where, node]) => [`focus ring on ${where}`, ring, backdrop(node), 3]),
+      ['focused composer edge outside', composerEdge, backdrop($('.composer').parentElement), 3],
+      ['focused composer edge inside', composerEdge, backdrop($('.composer')), 3],
+      ['dialog field edge outside', fieldEdge, backdrop($('#server-token').parentElement), 3],
+      ['dialog field edge inside', fieldEdge, backdrop($('#server-token')), 3],
+    ];
+    return pairs.filter(([, foreground, background, minimum]) => ratio(foreground, background) < minimum)
+      .map(([name, foreground, background]) => `${name}: ${ratio(foreground, background).toFixed(2)} for ${foreground} on ${background}`);
+  });
+  for (const colorScheme of ['light', 'dark']) {
+    await page.emulateMedia({ colorScheme });
+    expect.soft(await failures(), colorScheme).toEqual([]);
+  }
 });
