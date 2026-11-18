@@ -1013,26 +1013,40 @@ test('the tool label survives an event stream reconnect', async ({ page }) => {
   }
 });
 
-test('time separators label turns and a jump button returns to the latest reply', async ({ page }) => {
-  await page.clock.setFixedTime(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000));
-  await page.setViewportSize({ width: 1280, height: 520 });
-  await connect(page);
-  await newConversation(page);
-  for (let index = 0; index < 3; index += 1) {
-    const sent = await send(page, 'Markdownテスト');
-    await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
-  }
-  const separators = page.locator('#chat-log .time-separator');
-  await expect(separators).toHaveCount(1);
-  await expect(separators.first()).toHaveText(/^\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/);
-  const area = page.locator('#message-area');
-  const jump = page.getByRole('button', { name: '最新のメッセージへ移動', exact: true });
-  await expect(jump).toBeHidden();
-  await area.evaluate(node => { node.scrollTop = 0; });
-  await expect(jump).toBeVisible();
-  await jump.click();
-  await expect.poll(() => area.evaluate(node => node.scrollHeight - node.scrollTop - node.clientHeight)).toBeLessThan(100);
-  await expect(jump).toBeHidden();
+test.describe('in UTC', () => {
+  test.use({ timezoneId: 'UTC' });
+
+  test('time separators label turns and a jump button returns to the latest reply', async ({ page }) => {
+    // Fixed send times and clock give the same labels on any test date.
+    const sentAt = ['2025-12-31T23:50:00Z', '2026-01-01T00:10:00Z', '2026-01-01T00:20:00Z'];
+    await page.clock.setFixedTime(new Date('2026-01-02T09:00:00Z'));
+    await page.setViewportSize({ width: 1280, height: 520 });
+    await connect(page);
+    await newConversation(page);
+    for (let index = 0; index < sentAt.length; index += 1) {
+      const sent = await send(page, 'Markdownテスト');
+      await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+    }
+    await page.route(/\/v1\/conversations\/[^/]+\/snapshot$/, async route => {
+      const response = await route.fetch();
+      const snapshot = await response.json();
+      // Snapshot runs are newest first.
+      snapshot.runs.forEach((item, index) => { item.created_at = sentAt.at(-1 - index); });
+      await route.fulfill({ response, json: snapshot });
+    });
+    await page.reload();
+    await expectSignedIn(page);
+    // An earlier year is named; a new day opens a group even within 30 minutes.
+    await expect(page.locator('#chat-log .time-separator')).toHaveText(['2025年12月31日 23:50', '1月1日 00:10']);
+    const area = page.locator('#message-area');
+    const jump = page.getByRole('button', { name: '最新のメッセージへ移動', exact: true });
+    await expect(jump).toBeHidden();
+    await area.evaluate(node => { node.scrollTop = 0; });
+    await expect(jump).toBeVisible();
+    await jump.click();
+    await expect.poll(() => area.evaluate(node => node.scrollHeight - node.scrollTop - node.clientHeight)).toBeLessThan(100);
+    await expect(jump).toBeHidden();
+  });
 });
 
 test('streamed text below the reader offers the jump button without moving them', async ({ page }) => {
