@@ -686,10 +686,13 @@ async function refreshConversations(capturedConnection = connection) {
 function reconcileOutbox() {
   const pending = outbox.get(selectedId);
   if (!pending) return;
-  const found = runs.some((run) => matchesSubmission(run, pending));
+  const found = runs.find((run) => matchesSubmission(run, pending));
   if (found) {
     if (sending.get(selectedId) === pending.key) sending.delete(selectedId);
     outbox.delete(selectedId);
+    // History can show the run without the activity it raised, and the
+    // send's own response is now ignored.
+    touchConversation(selectedId, found.created_at);
     saveSession();
   }
 }

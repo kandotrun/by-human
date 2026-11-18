@@ -1262,11 +1262,20 @@ test('sending moves a conversation to the top of the list', async ({ page }) => 
 });
 
 test('history that confirms a delayed send moves the conversation to the top', async ({ page }) => {
+  const id = await createTitled(page, '名前のある会話');
   await connect(page);
-  const id = await newConversation(page);
   const other = await newConversation(page);
   await conversationButton(page, id).click();
   await expect(composer(page)).toBeEnabled();
+  // A named conversation's history can read the conversation before the send
+  // commits and its runs after, so only the accepted run shows the activity.
+  const { last_activity_at: before } = (await conversation(page, id)).conversation;
+  await page.route(`**/v1/conversations/${id}/snapshot`, async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.conversation.last_activity_at = before;
+    await route.fulfill({ response, json: body });
+  });
   const { promise: held, resolve: release } = Promise.withResolvers();
   const { promise: accepted, resolve: reportAccepted } = Promise.withResolvers();
   await page.route(`**/v1/conversations/${id}/runs`, async route => {
