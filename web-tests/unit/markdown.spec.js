@@ -122,6 +122,11 @@ test('code paths, fences in lists, URLs in emphasis and table escapes', async ({
   expect(await html(page, '- ```\n  ---\n  code\nOutside')).toBe('<ul><li>' + code('', '---\ncode') + '</li></ul><p>Outside</p>');
   expect(await html(page, '- item\n  | col |\n  | --- |\n  # Title\n  para\ncontinued')).toBe(
     '<ul><li>item<div class="table-scroll"><table><thead><tr><th>col</th></tr></thead></table></div><h1>Title</h1>para<br>continued</li></ul>');
+  // A table in a quote keeps its rows, and an indented line is a row as in parseBlocks.
+  expect(await html(page, '- > | a |\n  > | - |\n  > row\nlazy')).toBe(
+    '<ul><li><blockquote><div class="table-scroll"><table><thead><tr><th>a</th></tr></thead><tbody><tr><td>row</td></tr></tbody></table></div></blockquote></li></ul><p>lazy</p>');
+  expect(await html(page, '- | a |\n  | - |\n      # x\n  row2\nlazy')).toBe(
+    '<ul><li><div class="table-scroll"><table><thead><tr><th>a</th></tr></thead><tbody><tr><td># x</td></tr><tr><td>row2</td></tr></tbody></table></div></li></ul><p>lazy</p>');
 });
 
 test('hostile input never creates active content', async ({ page }) => {

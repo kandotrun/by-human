@@ -235,6 +235,7 @@ function parseList(lines, start, first, depth) {
     let fenceOpen = "";
     let fenceQuotes = 0;
     let tableOpen = false;
+    let tableQuotes = 0;
     let paragraphOpen = false;
     let previous = "";
     // Lazy continuation is allowed only while the innermost open block is a
@@ -251,18 +252,21 @@ function parseList(lines, start, first, depth) {
         previous = "";
         return;
       }
-      // As in parseBlocks, table rows end at a blank line or a block start.
-      if (tableOpen && startsBlock(inner, depth + 1)) tableOpen = false;
       let offset = 0;
       let quotes = 0;
+      let items = 0;
       for (;;) {
         CONTAINER_MARKER.lastIndex = offset;
         const marker = CONTAINER_MARKER.exec(inner);
         if (!marker || !marker[0] || (fenceOpen && (marker[0][0] !== ">" || quotes === fenceQuotes))) break;
         if (marker[0][0] === ">") quotes += 1;
+        else items += 1;
         offset = CONTAINER_MARKER.lastIndex;
       }
       inner = inner.slice(offset);
+      // As in parseBlocks, a table row keeps its container and indentation and
+      // ends at a blank line or a block start.
+      const row = tableOpen && quotes === tableQuotes && items === 0 && !startsBlock(offset ? inner : content, depth + 1);
       const fence = /^(`{3,}|~{3,})/.exec(inner);
       if (fenceOpen) {
         if (quotes === fenceQuotes && fence && fence[1][0] === fenceOpen[0] && fence[1].length >= fenceOpen.length && trimLine(inner).length === fence[1].length) fenceOpen = "";
@@ -275,11 +279,15 @@ function parseList(lines, start, first, depth) {
       } else if (inner === "") {
         tableOpen = false;
         paragraphOpen = false;
-      } else if (tableOpen || (previous.includes("|") && delimiterRow(inner))) {
+      } else if (row) {
         // Table rows continue without pipes.
+        paragraphOpen = false;
+      } else if (previous.includes("|") && delimiterRow(inner)) {
         tableOpen = true;
+        tableQuotes = quotes;
         paragraphOpen = false;
       } else {
+        tableOpen = false;
         paragraphOpen = !HEADING.test(inner);
       }
       previous = inner;
