@@ -1,5 +1,7 @@
 // The browser is a client of the durable API. Closing a stream never stops a
 // run, and an unacknowledged submission keeps its original identity.
+import { renderMarkdown } from "/markdown.js";
+
 const $ = (id) => document.getElementById(id);
 const encoder = new TextEncoder();
 const STORAGE_KEY = "by-human-chat-v1";
@@ -214,10 +216,20 @@ function renderMessages(forceScroll = false) {
     user.dataset.runId = run.id;
     turn.append(user);
     if (run.output_text) {
-      const assistant = element("div", "message assistant", run.output_text);
+      const assistant = element("div", "message assistant markdown");
       assistant.dataset.role = "assistant";
       assistant.dataset.runId = run.id;
+      assistant.append(renderMarkdown(run.output_text));
       turn.append(assistant);
+      if (!active(run)) {
+        const actions = element("div", "message-actions");
+        const copy = element("button", "message-copy", "コピー");
+        copy.type = "button";
+        copy.dataset.runId = run.id;
+        copy.setAttribute("aria-label", "返信をコピー");
+        actions.append(copy);
+        turn.append(actions);
+      }
     }
     const status = runStatus(run);
     if (status) turn.append(element("div", `message-status${unresolved(run) ? " warning" : ""}`, status));
@@ -283,6 +295,51 @@ function render(forceScroll = false) {
   renderSidebar();
   renderMessages(forceScroll);
   renderControls();
+}
+
+// Streamed text re-renders only its own reply, at most once per frame, so the
+// rest of the conversation keeps its nodes, selection and scroll position.
+let streamingFrame = 0;
+let streamingRunId = "";
+
+function scheduleStreamingRender(run) {
+  streamingRunId = run.id;
+  if (!streamingFrame) streamingFrame = requestAnimationFrame(renderStreamingReply);
+}
+
+function renderStreamingReply() {
+  streamingFrame = 0;
+  const run = runs.find((item) => item.id === streamingRunId);
+  const reply = run && [...$("chat-log").querySelectorAll('[data-role="assistant"]')].find((node) => node.dataset.runId === run.id);
+  if (!reply || !active(run)) {
+    renderMessages();
+    return;
+  }
+  const area = $("message-area");
+  const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
+  reply.replaceChildren(renderMarkdown(run.output_text));
+  if (nearBottom) area.scrollTop = area.scrollHeight;
+}
+
+function flashButton(button, label) {
+  button.dataset.label ??= button.textContent;
+  button.textContent = label;
+  clearTimeout(Number(button.dataset.timer));
+  button.dataset.timer = String(setTimeout(() => { button.textContent = button.dataset.label; }, 1500));
+}
+
+async function copyFromLog(event) {
+  const button = event.target.closest("button.code-copy, button.message-copy");
+  if (!button) return;
+  const text = button.classList.contains("code-copy")
+    ? button.closest(".code-block")?.querySelector("pre > code")?.textContent ?? ""
+    : runs.find((run) => run.id === button.dataset.runId)?.output_text ?? "";
+  try {
+    await navigator.clipboard.writeText(text);
+    flashButton(button, "コピーしました");
+  } catch {
+    flashButton(button, "コピーできませんでした");
+  }
 }
 
 function resizeComposer() {
@@ -702,7 +759,7 @@ async function startStream(id, captured) {
           if (active(run)) {
             run.output_text = text;
             progress = "応答中";
-            renderMessages();
+            scheduleStreamingRender(run);
           }
         } else if (record.event === "tool.started") progress = "ツールを実行中";
         else if (record.event === "tool.completed") progress = "応答を準備中";
@@ -892,6 +949,7 @@ $("message").addEventListener("keydown", (event) => {
   }
 });
 $("stop").addEventListener("click", stop);
+$("chat-log").addEventListener("click", copyFromLog);
 $("open-sidebar").addEventListener("click", () => setDrawer(true));
 $("close-sidebar").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });
 $("drawer-backdrop").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });

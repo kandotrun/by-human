@@ -80,6 +80,29 @@ impl Model for BrowserModel {
             cancel.cancelled().await;
             return Err(EngineError::cancelled());
         }
+        if message == "Markdownテスト" {
+            // A streamed Markdown reply split mid-document, like a real provider.
+            let first = "## 旅の準備\n\n- [x] 予約\n- [ ] **荷造り**\n\n```js\nconst ";
+            let last = "day = 1;\n```\n\n詳しくは [案内](https://example.com/guide) を参照。";
+            sink.emit(RuntimeEvent::TextDelta {
+                delta: first.into(),
+            })
+            .await?;
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(EngineError::cancelled()),
+                _ = tokio::time::sleep(Duration::from_millis(150)) => {}
+            }
+            sink.emit(RuntimeEvent::TextDelta { delta: last.into() })
+                .await?;
+            return Ok(ModelTurn {
+                output: vec![json!({
+                    "type":"message", "role":"assistant", "content":[{
+                        "type":"output_text", "text":format!("{first}{last}")
+                    }]
+                })],
+                usage: None,
+            });
+        }
         let first = "こんにちは。";
         let last = format!("「{message}」を受け取りました。");
         sink.emit(RuntimeEvent::TextDelta {

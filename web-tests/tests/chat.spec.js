@@ -895,3 +895,23 @@ test('a sign-in whose cookie is not kept explains the problem', async ({ page })
   await expect(dialog.getByRole('alert')).toHaveText('ログイン状態を保存できませんでした。ブラウザのCookie設定を確認してください。');
   await expect(dialog).toBeVisible();
 });
+
+test('replies render as Markdown with copy buttons', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await connect(page);
+  await newConversation(page);
+  const sent = await send(page, 'Markdownテスト');
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  const reply = assistantRows(page).last();
+  await expect(reply.getByRole('heading', { name: '旅の準備', level: 2 })).toBeVisible();
+  await expect(reply.locator('li.task-item input[type="checkbox"]')).toHaveCount(2);
+  await expect(reply.locator('li.task-item').nth(1).locator('strong')).toHaveText('荷造り');
+  await expect(reply.locator('.code-block[data-language="js"] code')).toHaveText('const day = 1;');
+  const guide = reply.getByRole('link', { name: '案内', exact: true });
+  await expect(guide).toHaveAttribute('href', 'https://example.com/guide');
+  await expect(guide).toHaveAttribute('target', '_blank');
+  await reply.getByRole('button', { name: 'コードをコピー', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('const day = 1;');
+  await page.getByRole('button', { name: '返信をコピー', exact: true }).last().click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('## 旅の準備\n\n- [x] 予約');
+});
