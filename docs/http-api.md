@@ -70,10 +70,14 @@ cookie.
 - A request with an `Authorization` header is judged only as bearer; an invalid
   bearer never falls back to the cookie. Missing, duplicate or malformed session
   cookies return `401`.
-- A session ends 30 days after its last use; use extends it at most once per
-  hour. `DELETE /v1/session` returns `204` and expires the cookie.
+- A session ends 30 days after its last recorded use. Use is recorded at most
+  once per hour, so a session can end up to an hour earlier; the cookie itself
+  lasts at most 400 days. `DELETE /v1/session` returns `204` and expires the
+  cookie.
 - Each session records a fingerprint of the server token. Rotating
-  `BY_HUMAN_API_TOKEN` ends every browser session.
+  `BY_HUMAN_API_TOKEN` ends every browser session, and at start-up the server
+  revokes sessions issued under any other token, so restoring an earlier token
+  does not revive them.
 
 ## Stop and recovery
 

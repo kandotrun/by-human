@@ -10,8 +10,10 @@ exchanges the token for a browser session and the page forgets the token
 immediately; it is never placed in a URL, localStorage or sessionStorage. The
 session lives in an `HttpOnly`, `SameSite=Strict` cookie that page scripts cannot
 read, so reloads, new tabs and browser restarts stay signed in. A session ends
-30 days after its last use, when you choose **ログアウト**, or for every browser
-when the server token is rotated. Requests stay on the page's origin, and the
+about 30 days after its last use (use is recorded at most hourly), when you
+choose **ログアウト**, or for every browser when the server token is rotated, and
+a sign-in lasts at most 400 days. If loading fails while the session is valid,
+the page keeps it and offers 再試行 instead of asking for the token. Requests stay on the page's origin, and the
 server accepts browser changes only from its own loopback address. Use HTTPS for
 any non-loopback access; this change does not configure a public endpoint, TLS,
 CORS, device pairing or an iPhone adapter. See [browser sessions](http-api.md#browser-sessions).

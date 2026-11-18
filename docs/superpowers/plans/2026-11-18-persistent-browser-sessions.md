@@ -38,7 +38,7 @@ cargo fmt --all --check
 
 **Files:** Create `server/src/browser_session.rs`; modify `server/src/lib.rs`.
 
-- [ ] **Step 1: Write the failing unit tests** at the bottom of the new module:
+- [ ] **Step 1: Write the failing unit tests** at the bottom of the new module, and register it with `pub mod browser_session;` in `server/src/lib.rs` so the tests compile:
 
 ```rust
 #[cfg(test)]
@@ -128,7 +128,7 @@ mod tests {
 
 - [ ] **Step 2: Run** `cargo test --locked -p by-human --lib browser_session` and confirm it fails to compile (module missing).
 
-- [ ] **Step 3: Implement the module** above the tests and register it with `pub mod browser_session;` in `server/src/lib.rs`:
+- [ ] **Step 3: Implement the module** above the tests:
 
 ```rust
 //! Browser sign-in sessions. The browser keeps a random secret in an
@@ -699,3 +699,13 @@ In the two reload tests replace `await connect(page, false);` after `page.reload
 
 - [ ] Run the four commands at the top on a fresh disposable PostgreSQL and save logs under `.work/`.
 - [ ] Start the browser fixture flow manually with Playwright screenshots of the sign-in dialog and a reloaded signed-in page; inspect them.
+
+## Changes after review
+
+Review rounds refined the design above; the code and tests are authoritative:
+
+- Origins for an HTTP listener on port 80 omit the default port, as browsers do.
+- With no allowed origin, cookie authentication is rejected entirely.
+- At start-up, sessions issued under another server token are revoked, so restoring an earlier token never revives them.
+- The client asks for the token only on `401`. Transport and server failures keep the session and offer 再試行, including the first list load after a successful sign-in; the sign-in button stays disabled until that load settles.
+- Pending text renders only while signed in, 新しい会話 waits for the conversation list, and a retry restores any tab-storage warning.

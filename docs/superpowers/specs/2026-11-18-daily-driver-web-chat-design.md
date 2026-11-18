@@ -76,10 +76,14 @@ cannot carry `Secure` in every browser.
 New table `browser_sessions(id, secret_hash, server_token_hash, created_at,
 last_used_at, expires_at, revoked_at)`. Only SHA-256 hashes are stored.
 
-- Sessions expire 30 days after last use. Use refreshes `expires_at` at most
-  once per hour to avoid a write per request.
+- Sessions expire 30 days after the last recorded use. Use is recorded at most
+  once per hour to avoid a write per request, so a session can end up to an hour
+  before 30 days have passed since its very last request. The cookie itself
+  lasts at most 400 days, so a sign-in is renewed at least that often.
 - `server_token_hash` is the SHA-256 of the server token at issue time. Rotating
-  `BY_HUMAN_API_TOKEN` therefore signs out every browser.
+  `BY_HUMAN_API_TOKEN` therefore signs out every browser. At start-up the server
+  revokes every session issued under another token, so restoring an earlier
+  token does not revive them.
 - Sign-out sets `revoked_at`. Expired and revoked rows older than seven days are
   pruned when a new session is created.
 
@@ -93,6 +97,9 @@ last_used_at, expires_at, revoked_at)`. Only SHA-256 hashes are stored.
 - The sidebar's 切断 becomes ログアウト (`DELETE /v1/session`).
 - Any `401` returns to the dialog with a message that the sign-in expired or
   ended. A `403` explains that the page must be opened at the server's own URL.
+- Transport or server failures, including the first list load right after a
+  successful sign-in, keep the session and offer 再試行. 新しい会話 stays
+  disabled until the conversation list has loaded.
 - Drafts and the unacknowledged-send outbox keep their current tab storage.
 
 ### Tests
@@ -108,8 +115,11 @@ last_used_at, expires_at, revoked_at)`. Only SHA-256 hashes are stored.
 
 ### Out of scope
 
-Listing or revoking other devices, QR pairing, rate limiting (the token has at
-least 32 random bytes), and remote `https` access (track 4).
+Listing or revoking other devices, QR pairing, notifying other open tabs of a
+sign-out (they return to the dialog on their next request), rate limiting, and
+remote `https` access (track 4). Skipping rate limiting relies on the server
+token being a long secret from a secure random source: the server checks only
+that it has 32 to 512 printable characters.
 
 ## 2. Readable replies and visible progress
 
