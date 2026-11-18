@@ -62,6 +62,69 @@ pub struct Conversation {
     pub(crate) title_pending: bool,
 }
 
+/// A conversation whose title or messages contain the search text. `matched`
+/// is the newest matching message, when one exists.
+#[derive(Clone, Debug, Serialize)]
+pub struct SearchResult {
+    #[serde(flatten)]
+    pub conversation: Conversation,
+    #[serde(rename = "match")]
+    pub matched: Option<SearchMatch>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SearchMatch {
+    pub run_id: Uuid,
+    pub role: &'static str,
+    /// Plain text around the match with collapsed whitespace, at most 121
+    /// characters plus an ellipsis at each cut end.
+    pub snippet: String,
+}
+
+#[derive(FromRow)]
+struct SearchRow {
+    #[sqlx(flatten)]
+    conversation: Conversation,
+    run_id: Option<Uuid>,
+    from_input: Option<bool>,
+    excerpt: Option<String>,
+    excerpt_start: Option<i32>,
+    text_chars: Option<i32>,
+}
+
+/// Only built-in functions, so one- and two-character Japanese queries work
+/// and no extension is needed. The query text is always a bound parameter;
+/// `strpos` treats LIKE wildcards and backslashes as ordinary characters.
+/// Tool records, reasoning items, events and review notes are never searched.
+const SEARCH_CONVERSATIONS: &str = "
+WITH hits AS (
+    SELECT c.id, c.last_activity_at, m.run_id
+    FROM conversations c
+    LEFT JOIN LATERAL (
+        SELECT r.id AS run_id FROM runs r
+        WHERE r.conversation_id = c.id
+          AND (strpos(lower(r.input_text), lower($1)) > 0 OR strpos(lower(r.output_text), lower($1)) > 0)
+        ORDER BY r.ordinal DESC
+        LIMIT 1
+    ) m ON TRUE
+    WHERE m.run_id IS NOT NULL OR strpos(lower(c.title), lower($1)) > 0
+    ORDER BY c.last_activity_at DESC, c.id DESC
+    LIMIT $2
+), matched AS (
+    SELECT h.id, r.id AS run_id, strpos(lower(r.input_text), lower($1)) > 0 AS from_input,
+        CASE WHEN strpos(lower(r.input_text), lower($1)) > 0 THEN r.input_text ELSE r.output_text END AS text
+    FROM hits h JOIN runs r ON r.id = h.run_id
+), placed AS (
+    SELECT id, run_id, from_input, text, greatest(strpos(lower(text), lower($1)) - 40, 1) AS start
+    FROM matched
+)
+SELECT c.*, p.run_id, p.from_input, substr(p.text, p.start, 121) AS excerpt,
+    p.start AS excerpt_start, char_length(p.text) AS text_chars
+FROM hits h
+JOIN conversations c ON c.id = h.id
+LEFT JOIN placed p ON p.id = h.id
+ORDER BY h.last_activity_at DESC, h.id DESC";
+
 #[derive(Clone, Debug, FromRow, Serialize)]
 pub struct BrowserSession {
     pub id: Uuid,
@@ -348,6 +411,58 @@ impl Store {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// Returns up to `limit` conversations in list order and whether more
+    /// matched. A slow scan fails instead of holding a pooled connection.
+    pub async fn search_conversations(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<(Vec<SearchResult>, bool)> {
+        validate_limit(limit)?;
+        let query = query.trim();
+        if query.is_empty() || query.chars().count() > 100 || query.contains('\0') {
+            return Err(StoreError::InvalidInput(
+                "query must contain 1 to 100 characters",
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '3s'")
+            .execute(&mut *tx)
+            .await?;
+        let mut rows: Vec<SearchRow> = sqlx::query_as(SEARCH_CONVERSATIONS)
+            .bind(query)
+            .bind(limit + 1)
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        let truncated = rows.len() as i64 > limit;
+        rows.truncate(limit as usize);
+        let results = rows
+            .into_iter()
+            .map(|row| SearchResult {
+                matched: match (row.run_id, row.excerpt, row.excerpt_start, row.text_chars) {
+                    (Some(run_id), Some(excerpt), Some(start), Some(chars)) => Some(SearchMatch {
+                        run_id,
+                        role: if row.from_input == Some(true) {
+                            "user"
+                        } else {
+                            "assistant"
+                        },
+                        snippet: format!(
+                            "{}{}{}",
+                            if start > 1 { "…" } else { "" },
+                            collapse_whitespace(&excerpt),
+                            if chars > start + 120 { "…" } else { "" },
+                        ),
+                    }),
+                    _ => None,
+                },
+                conversation: row.conversation,
+            })
+            .collect();
+        Ok((results, truncated))
     }
 
     /// A manual name also ends automatic titling. The row lock orders this
@@ -982,15 +1097,20 @@ fn normalized_title(title: &str) -> Result<&str> {
     Ok(title)
 }
 
-fn title_from_message(message: &str) -> String {
-    let without_controls: String = message
+/// Drops control characters and joins whitespace runs with one space.
+fn collapse_whitespace(text: &str) -> String {
+    let without_controls: String = text
         .chars()
         .filter(|ch| !ch.is_control() || ch.is_whitespace())
         .collect();
-    let title = without_controls
+    without_controls
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" ")
+}
+
+fn title_from_message(message: &str) -> String {
+    let title = collapse_whitespace(message);
     if title
         .chars()
         .all(|ch| ch.is_whitespace() || get_general_category(ch) == GeneralCategory::Format)

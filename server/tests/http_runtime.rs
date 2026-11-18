@@ -1384,3 +1384,134 @@ async fn a_conversation_with_active_work_cannot_be_deleted_over_http() {
     app.shutdown().await;
     db.cleanup().await;
 }
+
+#[tokio::test]
+async fn conversation_search_returns_public_matches_and_json_errors() {
+    let db = Database::new().await;
+    let app = TestApp::start(db.store.clone(), Arc::new(HappyModel::default())).await;
+    let search = |query: &str| {
+        app.client
+            .get(format!("{}/v1/conversations/search{query}", app.base))
+            .bearer_auth(TOKEN)
+            .send()
+    };
+    assert_eq!(
+        app.client
+            .get(format!("{}/v1/conversations/search?q=x", app.base))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let long = format!("?q={}", "a".repeat(401));
+    for query in [
+        "",
+        "?q=",
+        "?q=%20%20",
+        "?q=a%00b",
+        "?q=a&q=b",
+        "?q=a&x=1",
+        "?x=1",
+        long.as_str(),
+    ] {
+        let response = search(query).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            response.json::<Value>().await.unwrap(),
+            json!({"error": "invalid_input"})
+        );
+    }
+
+    let weather = app.conversation("天気の相談").await;
+    let sent: Value = app
+        .send(weather, "明日の天気は？", "weather")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let run: Uuid = sent["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(terminal(&db.store, run).await.status, RunStatus::Completed);
+    app.conversation("C++ の勉強").await;
+
+    let found: Value = search("?q=%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(found["truncated"], false);
+    let hit = &found["conversations"][0];
+    assert_eq!(found["conversations"].as_array().unwrap().len(), 1);
+    assert_eq!(hit["id"], weather.to_string());
+    assert_eq!(hit["title"], "天気の相談");
+    assert!(hit["last_activity_at"].is_string());
+    assert_eq!(
+        hit["match"],
+        json!({"run_id": run, "role": "assistant", "snippet": "こんにちは"})
+    );
+    let mut keys: Vec<_> = hit.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["created_at", "id", "last_activity_at", "match", "title"]
+    );
+
+    let plus: Value = search("?q=C%2B%2B").await.unwrap().json().await.unwrap();
+    assert_eq!(plus["conversations"][0]["title"], "C++ の勉強");
+    assert!(plus["conversations"][0]["match"].is_null());
+    let none: Value = search("?q=%E5%AD%98%E5%9C%A8%E3%81%97%E3%81%AA%E3%81%84")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(none, json!({"conversations": [], "truncated": false}));
+    // The static route does not hide a conversation's own routes.
+    assert_eq!(
+        app.client
+            .get(format!("{}/v1/conversations/{weather}", app.base))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    app.shutdown().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_conversation_list_reports_when_older_ones_exist() {
+    let db = Database::new().await;
+    let app = TestApp::start(db.store.clone(), Arc::new(HappyModel::default())).await;
+    let list = || async {
+        app.client
+            .get(format!("{}/v1/conversations", app.base))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    for index in 0..100 {
+        db.store
+            .create_conversation(&format!("会話 {index}"))
+            .await
+            .unwrap();
+    }
+    let full = list().await;
+    assert_eq!(full["has_more"], false);
+    assert_eq!(full["conversations"].as_array().unwrap().len(), 100);
+    db.store.create_conversation("101 件目").await.unwrap();
+    let more = list().await;
+    assert_eq!(more["has_more"], true);
+    assert_eq!(more["conversations"].as_array().unwrap().len(), 100);
+    assert_eq!(more["conversations"][0]["title"], "101 件目");
+    app.shutdown().await;
+    db.cleanup().await;
+}
