@@ -769,12 +769,31 @@ test('temporary loading failures keep the session and offer a retry', async ({ p
     await page.reload();
     await expect(page.getByRole('button', { name: '再試行', exact: true })).toBeVisible();
     await expect(signInDialog(page)).toBeHidden();
+    // A conversation created before the list loads could be dropped by it.
+    await expect(newChat(page)).toBeDisabled();
     await page.getByRole('button', { name: '再試行', exact: true }).click();
     await expectSignedIn(page);
     await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
     await expect(page.locator('#notice')).toBeHidden();
+    await expect(newChat(page)).toBeEnabled();
     await page.unroute(path);
   }
+});
+
+test('a retry keeps the reason sending is disabled by unreadable tab storage', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  await page.evaluate(() => sessionStorage.setItem('by-human-chat-v1', '{broken'));
+  let failures = 1;
+  await page.route('**/v1/session', route => {
+    if (failures === 0) return route.continue();
+    failures -= 1;
+    return route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"storage_unavailable"}' });
+  });
+  await page.reload();
+  await page.getByRole('button', { name: '再試行', exact: true }).click();
+  await expectSignedIn(page);
+  await expect(page.locator('#notice')).toContainText('このタブの送信待ちを読み込めませんでした');
 });
 
 test('pending text stays hidden while signed out and returns after signing in', async ({ page }) => {

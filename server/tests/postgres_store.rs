@@ -1049,3 +1049,65 @@ async fn browser_sessions_expire_revoke_and_follow_the_server_token() {
     );
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn restoring_an_earlier_server_token_does_not_revive_its_sessions() {
+    let fixture = Fixture::new().await;
+    let store = &fixture.store;
+    let (first, second) = ([1; 32], [2; 32]);
+    store
+        .create_browser_session(&[11; 32], &first, 3_600)
+        .await
+        .unwrap();
+    store
+        .create_browser_session(&[12; 32], &second, 3_600)
+        .await
+        .unwrap();
+    // The server starts with the second token, then the owner restores the first.
+    assert_eq!(
+        store
+            .revoke_browser_sessions_for_other_tokens(&second)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .revoke_browser_sessions_for_other_tokens(&first)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        store
+            .authenticate_browser_session(&[11; 32], &first, 3_600)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .authenticate_browser_session(&[12; 32], &second, 3_600)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let current = store
+        .create_browser_session(&[13; 32], &first, 3_600)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .revoke_browser_sessions_for_other_tokens(&first)
+            .await
+            .unwrap(),
+        0
+    );
+    let found = store
+        .authenticate_browser_session(&[13; 32], &first, 3_600)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.id, current.id);
+    fixture.cleanup().await;
+}

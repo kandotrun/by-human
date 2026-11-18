@@ -164,6 +164,14 @@ async fn serve() -> anyhow::Result<()> {
     let store = Store::connect(&config.database_url)
         .await
         .map_err(|_| anyhow::anyhow!("PostgreSQL could not be initialized"))?;
+    // A rotated server token ends browser sessions for good, even if an
+    // earlier token is restored later.
+    store
+        .revoke_browser_sessions_for_other_tokens(&by_human::browser_session::token_fingerprint(
+            &config.api_token,
+        ))
+        .await
+        .map_err(|_| anyhow::anyhow!("browser sessions could not be checked"))?;
     let shutdown = CancellationToken::new();
     // Register termination while MCP starts, so an interrupted handshake also
     // drops its owned process/connection instead of leaving an orphan.

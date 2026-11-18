@@ -409,6 +409,22 @@ impl Store {
         .await?)
     }
 
+    /// Ends every browser session issued under another server token. The
+    /// server calls this at start-up, so restoring an earlier token after a
+    /// rotation never revives its sessions.
+    pub async fn revoke_browser_sessions_for_other_tokens(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<u64> {
+        Ok(sqlx::query(
+            "UPDATE browser_sessions SET revoked_at = clock_timestamp() WHERE server_token_hash <> $1 AND revoked_at IS NULL",
+        )
+        .bind(&token_hash[..])
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
     pub async fn revoke_browser_session(&self, secret_hash: &[u8; 32]) -> Result<()> {
         sqlx::query(
             "UPDATE browser_sessions SET revoked_at = clock_timestamp() WHERE secret_hash = $1 AND revoked_at IS NULL",

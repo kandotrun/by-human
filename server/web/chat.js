@@ -12,6 +12,10 @@ const SIGNED_OUT = "ログインの有効期限が切れたか、ログアウト
 
 let signedIn = false;
 let signingOut = false;
+// True once this sign-in has loaded the conversation list; creating a
+// conversation earlier could be undone by a delayed list response.
+let listed = false;
+let storageWarning = "";
 let connection = 0;
 let selection = 0;
 let snapshotVersion = 0;
@@ -83,7 +87,8 @@ function restoreSession() {
   } catch {
     storageReadable = false;
     storageReady = false;
-    showNotice("このタブの送信待ちを読み込めませんでした。重複送信を防ぐため送信を止めています。ブラウザの保存設定を確認してください。");
+    storageWarning = "このタブの送信待ちを読み込めませんでした。重複送信を防ぐため送信を止めています。ブラウザの保存設定を確認してください。";
+    showNotice(storageWarning);
   }
 }
 
@@ -97,7 +102,8 @@ function saveSession() {
     return true;
   } catch {
     storageReady = false;
-    showNotice("送信待ちをこのタブに保存できません。重複送信を防ぐため、ブラウザの保存設定を確認してからもう一度操作してください。");
+    storageWarning = "送信待ちをこのタブに保存できません。重複送信を防ぐため、ブラウザの保存設定を確認してからもう一度操作してください。";
+    showNotice(storageWarning);
     return false;
   }
 }
@@ -168,8 +174,8 @@ function setDrawer(open) {
 }
 
 function renderSidebar() {
-  $("new-chat").disabled = !signedIn || creating;
-  $("empty-new-chat").disabled = !signedIn || creating;
+  $("new-chat").disabled = !signedIn || creating || !listed;
+  $("empty-new-chat").disabled = !signedIn || creating || !listed;
   $("disconnect").disabled = !signedIn || signingOut;
   $("connection-state").textContent = signedIn ? "ログイン中" : "未ログイン";
   $("connection-state").classList.toggle("connected", signedIn);
@@ -300,6 +306,7 @@ async function refreshConversations(capturedConnection = connection) {
   const result = await api("/conversations");
   if (capturedConnection !== connection || !signedIn) return;
   conversations = result.conversations.filter((item) => UUID.test(item.id));
+  listed = true;
   renderSidebar();
 }
 
@@ -405,6 +412,7 @@ function disconnect(message = "") {
   sending.clear();
   signedIn = false;
   signingOut = false;
+  listed = false;
   conversations = [];
   runs = [];
   olderRunsOmitted = false;
@@ -457,7 +465,8 @@ async function openSignedIn(capturedConnection) {
   await refreshConversations(capturedConnection);
   if (capturedConnection !== connection) return;
   if ($("connect-dialog").open) $("connect-dialog").close();
-  if (storageReady) showNotice();
+  // A retry notice may have replaced the reason sending is disabled.
+  showNotice(storageReady ? "" : storageWarning);
   render();
   const target = conversations.some((item) => item.id === selectedId) ? selectedId : conversations[0]?.id;
   if (target) await selectConversation(target);
