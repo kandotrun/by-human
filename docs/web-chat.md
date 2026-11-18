@@ -29,6 +29,13 @@ and task items, quotes, tables, inline and fenced code, and links limited to
 parses HTML, so HTML in a reply stays text, images appear as links and other
 link schemes as plain text. Each code block and reply has a copy button. Your
 own messages, and replies longer than 65,536 characters, stay plain text.
+
+While a reply runs, a status pill under the title shows 考えています, the tool in
+use (時刻を確認中, or `<server> のツールを実行中` for MCP tools) or 応答中, and
+typing dots fill the gap before the first token. A time label opens each
+conversation and marks gaps of 30 minutes or a new day. When you scroll up, a
+button returns to the latest reply. The layout follows the system light or dark
+theme.
 The browser loads the latest 100 runs that fit in an 8 MiB response. It marks
 omitted history at the top of the conversation. Older runs remain stored on the
 server. Paging remains outside this slice.
@@ -78,6 +85,8 @@ not an independent verification of external effects or a per-tool approval syste
 返信は見出し・リスト・表・コードなどのMarkdownで表示し、コードと返信本文はコピーできます。
 返信内のHTMLは実行せずに文字として表示し、画像は読み込まずリンクとして表示します。
 65,536文字を超える長い返信は、Markdownにせずそのまま文字で表示します。
+応答中はタイトルの下に「考えています」「時刻を確認中」「応答中」などの状態を表示し、
+画面はシステムのライト／ダーク設定に合わせます。
 
 下書きと送信結果の確認待ちは、このタブのsessionStorageに保存します。
 送信結果が不明なときは、同じ送信IDで確認し、新しいIDで送り直しません。
