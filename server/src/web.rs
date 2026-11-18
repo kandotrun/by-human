@@ -14,6 +14,7 @@ pub fn router() -> Router<ApiState> {
         .route("/", get(index))
         .route("/chat.css", get(styles))
         .route("/chat.js", get(script))
+        .route("/markdown.js", get(markdown))
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> Response {
@@ -51,5 +52,12 @@ async fn script() -> Response {
     asset(
         "text/javascript; charset=utf-8",
         include_str!("../web/chat.js"),
+    )
+}
+
+async fn markdown() -> Response {
+    asset(
+        "text/javascript; charset=utf-8",
+        include_str!("../web/markdown.js"),
     )
 }
