@@ -8,6 +8,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use futures_util::{Stream, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{
@@ -457,13 +458,21 @@ impl Store {
     pub async fn list_runs(&self, conversation_id: Uuid, limit: i64) -> Result<Vec<Run>> {
         validate_limit(limit)?;
         self.get_conversation(conversation_id).await?;
-        Ok(sqlx::query_as(
+        self.recent_runs(conversation_id, limit).try_collect().await
+    }
+
+    pub(crate) fn recent_runs(
+        &self,
+        conversation_id: Uuid,
+        limit: i64,
+    ) -> impl Stream<Item = Result<Run>> + '_ {
+        sqlx::query_as(
             "SELECT * FROM runs WHERE conversation_id = $1 ORDER BY ordinal DESC LIMIT $2",
         )
         .bind(conversation_id)
         .bind(limit)
-        .fetch_all(&self.pool)
-        .await?)
+        .fetch(&self.pool)
+        .map_err(StoreError::from)
     }
 
     pub async fn claim_next(&self, owner_id: Uuid) -> Result<Option<Run>> {

@@ -13,6 +13,7 @@ public TLS endpoint or device pairing UI.
 | POST | `/v1/conversations` | Create with `{"title":"..."}` |
 | GET | `/v1/conversations` | Latest 100 conversations |
 | GET | `/v1/conversations/{id}` | Conversation, latest chat messages and public run states |
+| GET | `/v1/conversations/{id}/snapshot` | Browser view with a bounded window of public runs |
 | POST | `/v1/conversations/{id}/runs` | Submit `{"message":"...","idempotency_key":"..."}` |
 | GET | `/v1/runs/{id}` | Public run state and settled text |
 | POST | `/v1/runs/{id}/cancel` | Request Stop; repeated requests are safe |
@@ -36,6 +37,9 @@ omitted from public run/history responses.
 
 Only the latest 100 runs are projected into conversation history in this slice;
 pagination is not implemented. Message input is limited to 24 KiB at the API.
+The browser snapshot includes only `conversation`, `runs` (newest first), and
+`older_runs_omitted`. It keeps a contiguous window of at most 100 runs within
+8 MiB of serialized JSON, including escaped text. Omitted history stays stored.
 Canonical context exceeding 256 completed turns or 2 MiB fails explicitly with
 `CONTEXT_LIMIT_REACHED`; compaction is not implemented yet.
 

@@ -15,8 +15,9 @@ The client supports new/existing conversations, Japanese multiline input,
 streamed replies, Stop, event-stream reconnection and per-conversation drafts.
 Tool activity appears as progress; tool arguments, results and reasoning do not
 appear as chat messages. Text is rendered literally, without HTML execution.
-The current history limit is the latest 100 runs; paging and Markdown rendering
-remain outside this slice.
+The browser loads the latest 100 runs that fit in an 8 MiB response. It marks
+omitted history at the top of the conversation. Older runs remain stored on the
+server. Paging and Markdown rendering remain outside this slice.
 
 Drafts and unacknowledged submissions are kept in this tab's sessionStorage.
 These contain conversation text. They are scoped to this server origin and tab,

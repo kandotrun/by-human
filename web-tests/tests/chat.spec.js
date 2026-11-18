@@ -48,6 +48,20 @@ async function conversation(page, id) {
   return response.json();
 }
 
+test('large stored histories open and allow a new message', async ({ page }) => {
+  await connect(page);
+  const title = '大きな履歴';
+  await page.getByRole('button', { name: title, exact: true }).click();
+  await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
+  await expect(composer(page)).toBeEnabled();
+  await expect(page.getByText('古い履歴の一部は省略されています。')).toHaveCount(1);
+  await expect(userRows(page).first()).not.toHaveText('依頼 1');
+  await expect(userRows(page).last()).toHaveText('依頼 9');
+  const next = await send(page, 'ここから続けて');
+  await expect.poll(async () => (await run(page, next.id)).status).toBe('completed');
+  await expect(assistantRows(page).last()).toHaveText('こんにちは。「ここから続けて」を受け取りました。');
+});
+
 test('Japanese send has one transcript row, clears the draft and never stores the token', async ({ page }, testInfo) => {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));

@@ -13,6 +13,7 @@ use axum::{
     },
     routing::{get, post},
 };
+use futures_util::TryStreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
@@ -24,6 +25,8 @@ use crate::store::{Run, Store, StoreError};
 const MAX_MESSAGE_BYTES: usize = 24 * 1024;
 const MAX_TITLE_BYTES: usize = 800;
 const MAX_KEY_BYTES: usize = 128;
+const CHAT_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+const CHAT_SNAPSHOT_RUNS: usize = 100;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -54,6 +57,7 @@ pub fn router(state: ApiState) -> Router {
             get(list_conversations).post(create_conversation),
         )
         .route("/conversations/{id}", get(get_conversation))
+        .route("/conversations/{id}/snapshot", get(chat_snapshot))
         .route("/conversations/{id}/runs", post(enqueue))
         .route("/runs/{id}", get(get_run))
         .route("/runs/{id}/cancel", post(cancel_run))
@@ -146,6 +150,36 @@ async fn get_conversation(
     Ok(Json(
         json!({"conversation": conversation, "messages": messages, "runs": runs}),
     ))
+}
+
+async fn chat_snapshot(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let conversation = state.store.get_conversation(id).await?;
+    let mut snapshot =
+        json!({"conversation": conversation, "runs": [], "older_runs_omitted": false});
+    let mut bytes = serde_json::to_vec(&snapshot)
+        .map_err(|_| StoreError::Storage)?
+        .len();
+    let mut rows = std::pin::pin!(state.store.recent_runs(id, CHAT_SNAPSHOT_RUNS as i64 + 1));
+    let mut runs = Vec::new();
+    while let Some(run) = rows.try_next().await? {
+        let run = public_run(&run);
+        // Count the escaped JSON sent on the wire, including separators and
+        // the envelope. Keep a contiguous newest window and the latest run.
+        bytes += serde_json::to_vec(&run)
+            .map_err(|_| StoreError::Storage)?
+            .len()
+            + usize::from(!runs.is_empty());
+        if bytes > CHAT_SNAPSHOT_BYTES || runs.len() == CHAT_SNAPSHOT_RUNS {
+            snapshot["older_runs_omitted"] = json!(true);
+            break;
+        }
+        runs.push(run);
+    }
+    snapshot["runs"] = Value::Array(runs);
+    Ok(Json(snapshot))
 }
 
 #[derive(Deserialize)]

@@ -15,6 +15,7 @@ let selectionAbort = new AbortController();
 let streamAbort = null;
 let conversations = [];
 let runs = [];
+let olderRunsOmitted = false;
 let selectedId = "";
 let currentConversation = null;
 let loading = false;
@@ -183,6 +184,7 @@ function renderMessages(forceScroll = false) {
   const oldTop = area.scrollTop;
   const log = $("chat-log");
   const fragment = document.createDocumentFragment();
+  if (olderRunsOmitted) fragment.append(element("p", "message-status", "古い履歴の一部は省略されています。"));
   for (const run of [...runs].reverse()) {
     const turn = element("div", "turn");
     const user = element("div", "message user", run.input_text);
@@ -297,6 +299,7 @@ async function selectConversation(id) {
   selectedId = id;
   currentConversation = conversations.find((item) => item.id === id) || null;
   runs = [];
+  olderRunsOmitted = false;
   loading = true;
   $("message").value = drafts.get(id) || "";
   saveSession();
@@ -306,10 +309,11 @@ async function selectConversation(id) {
   render(true);
   const captured = scope();
   try {
-    const result = await api(`/conversations/${id}`, { signal: selectionAbort.signal });
+    const result = await api(`/conversations/${id}/snapshot`, { signal: selectionAbort.signal });
     if (!current(captured)) return;
     currentConversation = result.conversation;
     runs = result.runs;
+    olderRunsOmitted = result.older_runs_omitted;
     reconcileOutbox();
     loading = false;
     render(true);
@@ -333,6 +337,7 @@ function disconnect(message = "") {
   token = "";
   conversations = [];
   runs = [];
+  olderRunsOmitted = false;
   currentConversation = null;
   loading = false;
   creating = false;

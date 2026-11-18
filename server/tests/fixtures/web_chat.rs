@@ -10,7 +10,7 @@ use by_human::{
         Tool, ToolDefinition, ToolRegistry,
     },
     runner::Runner,
-    store::Store,
+    store::{RunCompletion, RunStatus, Store},
 };
 use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -18,6 +18,33 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const TOKEN: &str = "by-human-web-contract-test-token-2026";
+
+async fn seed_large_history(store: &Store) -> anyhow::Result<()> {
+    let conversation = store.create_conversation("大きな履歴").await?;
+    let owner = store.acquire_owner().await?;
+    let line = "partial reply\n";
+    let output_text = line.repeat(1_048_576 / line.len());
+    for i in 1..=9 {
+        let run = store
+            .enqueue(conversation.id, &format!("large-{i}"), &format!("依頼 {i}"))
+            .await?;
+        store.claim_next(owner.owner_id()).await?;
+        store
+            .finish(
+                run.run.id,
+                owner.owner_id(),
+                RunCompletion {
+                    status: RunStatus::Failed,
+                    output_items: vec![],
+                    output_text: output_text.clone(),
+                    error_code: Some("SYNTHETIC_FAILURE".to_owned()),
+                },
+            )
+            .await?;
+    }
+    owner.release().await?;
+    Ok(())
+}
 
 struct BrowserModel;
 
@@ -134,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         .connect_with(options)
         .await?;
     let store = Store::from_pool(pool.clone()).await?;
+    seed_large_history(&store).await?;
     let shutdown = CancellationToken::new();
     let mut tools = ToolRegistry::default();
     tools.register(Arc::new(UnknownAction))?;
