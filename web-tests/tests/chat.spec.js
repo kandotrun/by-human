@@ -2005,6 +2005,21 @@ test.describe('on a phone', () => {
     expect((await dialog.boundingBox()).y).toBeLessThan(40);
   });
 
+  test('a tall dialog below the notch stays above the keyboard', async ({ page }) => {
+    await emulateKeyboard(page);
+    // A Dynamic Island iPhone's safe area pushes the dialog 59px down.
+    const session = await page.context().newCDPSession(page);
+    await session.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 59, bottom: 34, left: 0, right: 0 } });
+    await page.goto('/');
+    const dialog = signInDialog(page);
+    await expect(dialog).toBeVisible();
+    await page.evaluate(() => window.showKeyboard(300));
+    const box = await dialog.boundingBox();
+    expect(box.y).toBe(59);
+    // It keeps a 12px gap above the keyboard.
+    expect(box.y + box.height).toBeLessThanOrEqual(300 - 12);
+  });
+
   test('the layout fits the visible area above the keyboard', async ({ page }) => {
     await emulateKeyboard(page);
     await connect(page);
