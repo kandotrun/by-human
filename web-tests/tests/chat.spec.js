@@ -1977,6 +1977,17 @@ test.describe('on a phone', () => {
     await expect(userRows(page).last()).toHaveText('一行目\n二行目');
   });
 
+  test('fields do not trigger iOS zoom and dialogs stay above the keyboard', async ({ page }) => {
+    await page.goto('/');
+    const dialog = signInDialog(page);
+    await expect(dialog).toBeVisible();
+    // iOS zooms into focused fields under 16px and keeps the page zoomed.
+    for (const selector of ['#server-token', '#message', '#conversation-query', '#rename-input', '#review-note']) {
+      expect(await page.locator(selector).evaluate(node => getComputedStyle(node).fontSize), selector).toBe('16px');
+    }
+    expect((await dialog.boundingBox()).y).toBeLessThan(40);
+  });
+
   test('the layout fits the visible area above the keyboard', async ({ page }) => {
     // iOS keeps the layout viewport and shrinks only the visual viewport.
     await page.addInitScript(() => {

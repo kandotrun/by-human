@@ -1488,6 +1488,11 @@ function fitViewport() {
   if (window.scrollY) window.scrollTo(0, 0);
 }
 window.visualViewport?.addEventListener("resize", fitViewport);
+// The shell never needs page scrolling; iOS can still scroll it while the
+// keyboard or a dialog moves focus, which would hide the header.
+window.addEventListener("scroll", () => {
+  if (window.scrollY && !(window.visualViewport?.scale > 1.01)) window.scrollTo(0, 0);
+}, { passive: true });
 fitViewport();
 restoreSession();
 render();

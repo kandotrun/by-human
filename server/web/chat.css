@@ -240,6 +240,10 @@ dialog::backdrop { background: #172a444d; backdrop-filter: blur(4px); }
 }
 @media (hover: none) and (pointer: coarse) {
   .composer-caption { display: none; }
+  /* iOS zooms into any focused field smaller than 16px and stays zoomed. */
+  input, textarea { font-size: 16px !important; }
+  /* Dialogs sit at the top so their buttons stay above the keyboard. */
+  dialog { margin: max(12px, env(safe-area-inset-top)) auto auto; max-height: calc(var(--app-height, 100dvh) - 24px); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
