@@ -1230,7 +1230,8 @@ test.describe('in Tokyo time', () => {
     ];
     const rows = [];
     for (const [label, at] of groups) {
-      rows.push({ id: await createTitled(page, `${label}の会話`), title: `${label}の会話`, created_at: at, last_activity_at: at });
+      // Creation predates every group, so only the activity can place a row.
+      rows.push({ id: await createTitled(page, `${label}の会話`), title: `${label}の会話`, created_at: '2024-01-01T12:00:00+09:00', last_activity_at: at });
     }
     await page.route('**/v1/conversations', route => route.request().method() === 'GET'
       ? route.fulfill({ json: { conversations: rows } })
@@ -1258,6 +1259,34 @@ test('sending moves a conversation to the top of the list', async ({ page }) => 
   await page.reload();
   await expectSignedIn(page);
   await expect(firstListed(page)).toHaveAttribute('data-conversation-id', older);
+});
+
+test('history that confirms a delayed send moves the conversation to the top', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const other = await newConversation(page);
+  await conversationButton(page, id).click();
+  await expect(composer(page)).toBeEnabled();
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  const { promise: accepted, resolve: reportAccepted } = Promise.withResolvers();
+  await page.route(`**/v1/conversations/${id}/runs`, async route => {
+    const response = await route.fetch();
+    reportAccepted();
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
+    await composer(page).fill('履歴で受付を確認');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await accepted;
+    await expect(firstListed(page)).toHaveAttribute('data-conversation-id', other);
+    await conversationButton(page, other).click();
+    await conversationButton(page, id).click();
+    await expect(assistantRows(page)).toHaveText('こんにちは。「履歴で受付を確認」を受け取りました。');
+    await expect(firstListed(page)).toHaveAttribute('data-conversation-id', id);
+  } finally {
+    release();
+  }
 });
 
 test('a conversation can be renamed from its menu by keyboard', async ({ page }) => {
@@ -1522,4 +1551,30 @@ test('the list reloads when the tab becomes visible again', async ({ page }) => 
   await expect(conversationButton(page, created)).toHaveCount(0);
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
   await expect(conversationButton(page, created)).toHaveText('別のタブで作成');
+});
+
+test('a list reload during creation keeps one row for the new conversation', async ({ page }) => {
+  await connect(page);
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  const { promise: committed, resolve: reportCommitted } = Promise.withResolvers();
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const response = await route.fetch();
+    reportCommitted((await response.json()).id);
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
+    await newChat(page).click();
+    const id = await committed;
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await expect(conversationButton(page, id)).toHaveCount(1);
+    release();
+    await expect(conversationTitle(page)).toHaveText('新しい会話');
+    await expect(composer(page)).toBeFocused();
+    await expect(conversationButton(page, id)).toHaveCount(1);
+    await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
+  } finally {
+    release();
+  }
 });

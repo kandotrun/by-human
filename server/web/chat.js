@@ -208,7 +208,7 @@ function renderSidebar() {
   let group = null;
   let label = "";
   for (const conversation of conversations) {
-    const next = activityGroup(conversation.last_activity_at ?? conversation.created_at, now);
+    const next = activityGroup(conversation.last_activity_at, now);
     if (!group || next !== label) {
       label = next;
       const heading = element("h2", "conversation-group", label);
@@ -422,9 +422,10 @@ function forgetConversation(id, notice = false) {
 // Keeps the list in activity order after an accepted message.
 function touchConversation(id, at) {
   const index = conversations.findIndex((item) => item.id === id);
-  if (index < 0 || typeof at !== "string") return;
+  // Nothing moves, so a list response already in flight stays valid.
+  if (index < 0 || typeof at !== "string" || Date.parse(conversations[index].last_activity_at) >= Date.parse(at)) return;
   const [conversation] = conversations.splice(index, 1);
-  if (!(Date.parse(conversation.last_activity_at) >= Date.parse(at))) conversation.last_activity_at = at;
+  conversation.last_activity_at = at;
   const time = Date.parse(conversation.last_activity_at);
   const position = conversations.findIndex((item) => !(Date.parse(item.last_activity_at) > time));
   conversations.splice(position < 0 ? conversations.length : position, 0, conversation);
@@ -748,6 +749,8 @@ async function loadConversationSnapshot({ focusComposer = false, refresh = false
     if (!ownsSnapshot()) return;
     currentConversation = result.conversation;
     updateConversationTitle(captured.id, currentConversation.title);
+    // History can confirm a send before its own response arrives.
+    touchConversation(captured.id, currentConversation.last_activity_at);
     const displayedRuns = new Map(runs.map((run) => [run.id, run]));
     runs = result.runs.map((run) => {
       const displayed = displayedRuns.get(run.id);
@@ -900,7 +903,8 @@ async function createConversation() {
     const result = await api("/conversations", { method: "POST", body: {} });
     if (captured.connection !== connection || !signedIn) return;
     listGeneration += 1;
-    conversations.unshift(result);
+    // A list reload can already include it.
+    if (!conversations.some((item) => item.id === result.id)) conversations.unshift(result);
     if (current(captured)) await selectConversation(result.id, true);
   } catch (error) {
     if (current(captured)) {
