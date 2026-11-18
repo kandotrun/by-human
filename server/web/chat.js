@@ -409,6 +409,9 @@ async function rename(event) {
     if (selectedId === id && loading) refreshCurrentConversation();
     renderSidebar();
     renderControls();
+    // A search answer requested earlier would too, and the new title may no
+    // longer match, so any search runs again.
+    runSearch();
   } catch (error) {
     if (capturedConnection !== connection) return;
     if (error instanceof ApiError && error.status === 404) {
@@ -475,6 +478,9 @@ function deleted(id, notice = false) {
   focusAfterDelete = (shown[index + 1] ?? shown[index - 1])?.id ?? "";
   forgetConversation(id, notice);
   $("delete-dialog").close();
+  // A search answer requested earlier would bring the row back, so any
+  // search runs again.
+  runSearch();
 }
 
 // Drops a deleted conversation and this tab's draft and pending text for it.
@@ -1002,8 +1008,9 @@ async function createConversation() {
     // A list reload can already include it, and a send accepted meanwhile is
     // newer activity.
     if (!conversations.some((item) => item.id === result.id)) insertByActivity(result);
-    // The new conversation belongs at the top of the full list.
-    if (searchResults) clearSearch();
+    // The new conversation belongs at the full list, which a search answer
+    // still on its way would replace.
+    clearSearch();
     if (current(captured)) await selectConversation(result.id, true);
   } catch (error) {
     if (current(captured)) {
@@ -1411,9 +1418,14 @@ $("conversation-menu").addEventListener("toggle", (event) => {
   markMenuRow(open);
 });
 $("conversation-list").addEventListener("scroll", closeMenu, { passive: true });
-$("conversation-query").addEventListener("compositionstart", () => { searchComposing = true; clearTimeout(searchTimer); });
+// Any edit makes an answer for the previous text stale at once; the next
+// request still waits for the pause and for IME conversion to finish.
+$("conversation-query").addEventListener("compositionstart", () => { searchComposing = true; searchRequest += 1; clearTimeout(searchTimer); });
 $("conversation-query").addEventListener("compositionend", () => { searchComposing = false; scheduleSearch(); });
-$("conversation-query").addEventListener("input", (event) => { if (!searchComposing && !event.isComposing) scheduleSearch(); });
+$("conversation-query").addEventListener("input", (event) => {
+  searchRequest += 1;
+  if (!searchComposing && !event.isComposing) scheduleSearch();
+});
 $("conversation-query").addEventListener("keydown", (event) => {
   if (event.isComposing || searchComposing || event.keyCode === 229) return;
   if (event.key === "Enter") {

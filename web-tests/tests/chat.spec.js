@@ -1742,3 +1742,125 @@ test('the list says when older conversations exist', async ({ page }) => {
   await connect(page);
   await expect(page.locator('#conversation-list .sidebar-more')).toHaveText('これより古い会話は検索で探せます。');
 });
+
+const searchRequests = url => url.pathname === '/v1/conversations/search';
+
+test('renaming or deleting during a search refreshes its results', async ({ page }) => {
+  const suffix = Date.now().toString(36);
+  const query = `書き換え${suffix}`;
+  const renamed = await createTitled(page, `${query}の前`);
+  const kept = await createTitled(page, `${query}を残す`);
+  const removed = await createTitled(page, `${query}を削除`);
+  await connect(page);
+  // The next search answer is fetched at once and delivered when released.
+  const releases = [];
+  let gate = null;
+  let held = 0;
+  await page.route(searchRequests, async route => {
+    const wait = gate;
+    gate = null;
+    if (!wait) return route.continue();
+    const response = await route.fetch();
+    held += 1;
+    await wait;
+    await route.fulfill({ response });
+  });
+  const holdNextSearch = () => {
+    const { promise, resolve } = Promise.withResolvers();
+    gate = promise;
+    releases.push(resolve);
+    return resolve;
+  };
+  const rows = page.locator('#conversation-list [data-conversation-id]');
+  try {
+    const releaseBeforeRename = holdNextSearch();
+    await searchBox(page).fill(query);
+    await expect.poll(() => held).toBe(1);
+    await openMenu(page, renamed, '名前を変更');
+    await renameDialog(page).getByLabel('名前', { exact: true }).fill(`改名後${suffix}`);
+    await page.keyboard.press('Enter');
+    await expect(renameDialog(page)).toBeHidden();
+    releaseBeforeRename();
+    // Neither the old title nor the new one, which no longer matches, stays.
+    await expect(rows).toHaveCount(2);
+    await expect(conversationButton(page, renamed)).toHaveCount(0);
+
+    await searchBox(page).press('Escape');
+    const releaseBeforeDelete = holdNextSearch();
+    await searchBox(page).fill(query);
+    await expect.poll(() => held).toBe(2);
+    await openMenu(page, removed, '削除');
+    await deleteDialog(page).getByRole('button', { name: '削除', exact: true }).click();
+    await expect(deleteDialog(page)).toBeHidden();
+    releaseBeforeDelete();
+    // The deleted row does not come back.
+    await expect(rows).toHaveCount(1);
+    await expect(conversationButton(page, kept)).toBeVisible();
+  } finally {
+    for (const release of releases) release();
+  }
+});
+
+test('a changed query ignores the answer for the previous one', async ({ page }) => {
+  const suffix = Date.now().toString(36);
+  const before = await createTitled(page, `前の語${suffix}`);
+  const after = await createTitled(page, `次の語${suffix}`);
+  await connect(page);
+  const releases = [];
+  await page.route(searchRequests, async route => {
+    const response = await route.fetch();
+    const { promise, resolve } = Promise.withResolvers();
+    releases.push(resolve);
+    await promise;
+    await route.fulfill({ response });
+  });
+  try {
+    // The previous answer arrives while Japanese input is converting.
+    await searchBox(page).fill(`前の語${suffix}`);
+    await expect.poll(() => releases.length).toBe(1);
+    await searchBox(page).dispatchEvent('compositionstart');
+    await searchBox(page).fill(`次の語${suffix}`);
+    releases[0]();
+    await searchBox(page).dispatchEvent('compositionend');
+    await expect.poll(() => releases.length).toBe(2);
+    await expect(conversationButton(page, after)).toBeVisible();
+    releases[1]();
+    await expect(conversationButton(page, before)).toHaveCount(0);
+
+    // The previous answer arrives during the pause after typing.
+    await searchBox(page).fill(`前の語${suffix}`);
+    await expect.poll(() => releases.length).toBe(3);
+    await searchBox(page).fill(`次の語${suffix}`);
+    releases[2]();
+    await expect.poll(() => releases.length).toBe(4);
+    await expect(conversationButton(page, after)).toBeVisible();
+    await expect(conversationButton(page, before)).toHaveCount(0);
+    releases[3]();
+    await expect(conversationButton(page, after)).toBeVisible();
+  } finally {
+    for (const release of releases) release();
+  }
+});
+
+test('creating a conversation ends a search that has not answered yet', async ({ page }) => {
+  await connect(page);
+  const { promise: hold, resolve: release } = Promise.withResolvers();
+  let held = false;
+  await page.route(searchRequests, async route => {
+    held = true;
+    const response = await route.fetch();
+    await hold;
+    await route.fulfill({ response });
+  });
+  try {
+    await searchBox(page).fill(`該当なし${Date.now().toString(36)}`);
+    await expect.poll(() => held).toBe(true);
+    const created = await newConversation(page);
+    await expect(searchBox(page)).toHaveValue('');
+    release();
+    await expect(conversationButton(page, created)).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('#conversation-list .sidebar-empty')).toHaveCount(0);
+  } finally {
+    release();
+  }
+});
