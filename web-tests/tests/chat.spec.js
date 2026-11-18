@@ -1035,6 +1035,42 @@ test('time separators label turns and a jump button returns to the latest reply'
   await expect(jump).toBeHidden();
 });
 
+test('streamed text below the reader offers the jump button without moving them', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 520 });
+  await connect(page);
+  await newConversation(page);
+  for (let index = 0; index < 2; index += 1) {
+    const sent = await send(page, 'Markdownテスト');
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  }
+  const { promise: holdEvents, resolve: releaseEvents } = Promise.withResolvers();
+  await page.route('**/v1/runs/*/events', async route => {
+    await holdEvents;
+    await route.continue();
+  });
+  const sent = await send(page, '停止テスト');
+  const reply = page.locator(`#chat-log [data-role="assistant"][data-run-id="${sent.id}"]`);
+  const area = page.locator('#message-area');
+  const jump = page.getByRole('button', { name: '最新のメッセージへ移動', exact: true });
+  try {
+    await expect(reply.locator('.typing')).toBeVisible();
+    await expect(jump).toBeHidden();
+    // After pending scroll events, a shorter viewport, such as an on-screen
+    // keyboard, leaves the reader 150 px above the latest text without one.
+    await area.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+    await page.setViewportSize({ width: 1280, height: 370 });
+    const top = await area.evaluate(node => node.scrollTop);
+    releaseEvents();
+    await expect(reply).toHaveText('停止操作を待っています。');
+    await expect(jump).toBeVisible();
+    expect(await area.evaluate(node => node.scrollTop)).toBe(top);
+  } finally {
+    releaseEvents();
+    await page.request.post(`/v1/runs/${sent.id}/cancel`, { headers: auth });
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe('cancelled');
+  }
+});
+
 test('the chat follows the system dark theme', async ({ page }) => {
   const canvas = () => page.evaluate(() => {
     const [red, green, blue, alpha = 1] = getComputedStyle(document.documentElement).backgroundColor.match(/[\d.]+/g).map(Number);

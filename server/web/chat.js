@@ -11,6 +11,9 @@ const unresolved = (run) => run?.status === "uncertain" && !run.reviewed_at;
 const matchesSubmission = (run, pending) => run.id === pending.runId ||
   (run.idempotency_key === pending.key && run.input_text === pending.text);
 const SIGNED_OUT = "ログインの有効期限が切れたか、ログアウトしました。サーバートークンを入力してください。";
+// Within this distance of the bottom, replies follow new text and the jump
+// button stays hidden.
+const FOLLOW_DISTANCE = 100;
 
 let signedIn = false;
 let signingOut = false;
@@ -215,7 +218,7 @@ function renderReply(reply, text) {
 
 function renderMessages(forceScroll = false) {
   const area = $("message-area");
-  const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
+  const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < FOLLOW_DISTANCE;
   const oldTop = area.scrollTop;
   const log = $("chat-log");
   const fragment = document.createDocumentFragment();
@@ -310,7 +313,7 @@ function timeSeparator(sent) {
 
 function updateJumpButton() {
   const area = $("message-area");
-  $("jump-latest").hidden = area.scrollHeight - area.scrollTop - area.clientHeight < 240;
+  $("jump-latest").hidden = area.scrollHeight - area.scrollTop - area.clientHeight < FOLLOW_DISTANCE;
 }
 
 function jumpToLatest() {
@@ -381,10 +384,12 @@ function renderStreamingReply() {
   // completion and selection changes render the log themselves.
   if (!reply || !active(run)) return;
   const area = $("message-area");
-  const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
+  const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < FOLLOW_DISTANCE;
   reply.classList.remove("waiting");
   renderReply(reply, run.output_text);
   if (nearBottom) area.scrollTop = area.scrollHeight;
+  // Growth below the reader fires no scroll event.
+  updateJumpButton();
 }
 
 // The button keeps its accessible name, so the result is announced by a status
