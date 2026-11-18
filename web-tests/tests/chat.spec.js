@@ -1864,3 +1864,17 @@ test('creating a conversation ends a search that has not answered yet', async ({
     release();
   }
 });
+
+test('Escape during Japanese conversion in the search field keeps the drawer open', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await connect(page);
+  await page.getByRole('button', { name: '会話一覧を開く', exact: true }).click();
+  const list = page.getByRole('navigation', { name: '会話一覧', exact: true });
+  await expect(list).toBeVisible();
+  await searchBox(page).fill('にほんご');
+  await searchBox(page).dispatchEvent('compositionstart');
+  await searchBox(page).dispatchEvent('keydown', { key: 'Escape', code: 'Escape', isComposing: true, keyCode: 229 });
+  await expect(list).toBeVisible();
+  await expect(searchBox(page)).toHaveValue('にほんご');
+  await searchBox(page).dispatchEvent('compositionend');
+});
