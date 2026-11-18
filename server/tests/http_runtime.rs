@@ -1163,3 +1163,224 @@ async fn browser_sessions_are_unavailable_without_an_allowed_origin() {
     app.shutdown().await;
     db.cleanup().await;
 }
+
+#[tokio::test]
+async fn conversations_can_be_renamed_and_deleted_over_http() {
+    let db = Database::new().await;
+    let app = TestApp::start(db.store.clone(), Arc::new(HappyModel::default())).await;
+    let url = |id: Uuid| format!("{}/v1/conversations/{id}", app.base);
+    let rename = |id: Uuid, body: Value| {
+        app.client
+            .patch(url(id))
+            .bearer_auth(TOKEN)
+            .json(&body)
+            .send()
+    };
+    let delete = |id: Uuid| app.client.delete(url(id)).bearer_auth(TOKEN).send();
+
+    let id = app.conversation("元の名前").await;
+    let renamed = rename(id, json!({"title": " 新しい名前 "})).await.unwrap();
+    assert_eq!(renamed.status(), StatusCode::OK);
+    assert_eq!(renamed.headers()["cache-control"], "no-store");
+    let body: Value = renamed.json().await.unwrap();
+    assert_eq!(body["id"], id.to_string());
+    assert_eq!(body["title"], "新しい名前");
+    assert!(body["last_activity_at"].is_string());
+    assert!(body.get("title_pending").is_none());
+    for (payload, status) in [
+        (json!({"title": "   "}), StatusCode::BAD_REQUEST),
+        (json!({"title": "a\u{0}b"}), StatusCode::BAD_REQUEST),
+        (json!({"title": "名".repeat(201)}), StatusCode::BAD_REQUEST),
+        (
+            json!({"title": "x", "extra": 1}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (json!({}), StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        assert_eq!(rename(id, payload).await.unwrap().status(), status);
+    }
+    let missing = rename(Uuid::new_v4(), json!({"title": "x"})).await.unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        missing.json::<Value>().await.unwrap(),
+        json!({"error": "not_found"})
+    );
+
+    let other = app.conversation("残す").await;
+    let sent: Value = app
+        .send(id, "削除前のメッセージ", "before-delete")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let run: Uuid = sent["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(terminal(&db.store, run).await.status, RunStatus::Completed);
+    let listed: Value = app
+        .client
+        .get(format!("{}/v1/conversations", app.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // The new message moved the renamed conversation above the newer one.
+    assert_eq!(listed["conversations"][0]["id"], id.to_string());
+    assert_eq!(listed["conversations"][0]["title"], "新しい名前");
+    assert_eq!(listed["conversations"][1]["id"], other.to_string());
+
+    let deleted = delete(id).await.unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert!(deleted.bytes().await.unwrap().is_empty());
+    assert_eq!(delete(id).await.unwrap().status(), StatusCode::NOT_FOUND);
+    let gone = app
+        .client
+        .get(url(id))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        app.send(id, "削除後", "after-delete").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        app.client
+            .get(format!("{}/v1/runs/{run}", app.base))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    // The runner keeps serving other conversations.
+    let next: Value = app
+        .send(other, "別の会話", "after-delete-other")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let next: Uuid = next["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(terminal(&db.store, next).await.status, RunStatus::Completed);
+
+    // Browser sessions need an allowed Origin for both changes.
+    let signed_in = app
+        .client
+        .post(format!("{}/v1/sessions", app.base))
+        .header("origin", &app.base)
+        .json(&json!({"token": TOKEN}))
+        .send()
+        .await
+        .unwrap();
+    let cookie = signed_in.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let browser = |request: reqwest::RequestBuilder, origin: Option<&str>| {
+        let request = request.header("cookie", &cookie);
+        match origin {
+            Some(origin) => request.header("origin", origin),
+            None => request,
+        }
+        .send()
+    };
+    for origin in [None, Some("http://evil.example")] {
+        assert_eq!(
+            browser(
+                app.client.patch(url(other)).json(&json!({"title": "x"})),
+                origin
+            )
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            browser(app.client.delete(url(other)), origin)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        browser(
+            app.client
+                .patch(url(other))
+                .json(&json!({"title": "ブラウザ"})),
+            Some(&app.base)
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        browser(app.client.delete(url(other)), Some(&app.base))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    app.shutdown().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_conversation_with_active_work_cannot_be_deleted_over_http() {
+    let db = Database::new().await;
+    let model = Arc::new(DelayedModel::default());
+    let app = TestApp::start(db.store.clone(), model.clone()).await;
+    let conversation = app.conversation("実行中").await;
+    let url = format!("{}/v1/conversations/{conversation}", app.base);
+    let run: Value = app
+        .send(conversation, "待つ", "busy")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let id: Uuid = run["id"].as_str().unwrap().parse().unwrap();
+    tokio::time::timeout(Duration::from_secs(3), model.entered.notified())
+        .await
+        .unwrap();
+    let refused = app
+        .client
+        .delete(&url)
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        refused.json::<Value>().await.unwrap(),
+        json!({"error": "conflict"})
+    );
+    app.client
+        .post(format!("{}/v1/runs/{id}/cancel", app.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    model.release.notify_one();
+    assert_eq!(terminal(&db.store, id).await.status, RunStatus::Cancelled);
+    assert_eq!(
+        app.client
+            .delete(&url)
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    app.shutdown().await;
+    db.cleanup().await;
+}

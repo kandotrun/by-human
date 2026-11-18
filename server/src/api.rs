@@ -74,7 +74,12 @@ pub fn router(state: ApiState) -> Router {
             "/conversations",
             get(list_conversations).post(create_conversation),
         )
-        .route("/conversations/{id}", get(get_conversation))
+        .route(
+            "/conversations/{id}",
+            get(get_conversation)
+                .patch(rename_conversation)
+                .delete(delete_conversation),
+        )
         .route("/conversations/{id}/snapshot", get(chat_snapshot))
         .route("/conversations/{id}/runs", post(enqueue))
         .route("/runs/{id}", get(get_run))
@@ -267,6 +272,31 @@ async fn list_conversations(State(state): State<ApiState>) -> Result<Json<Value>
     ))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameConversation {
+    title: String,
+}
+
+async fn rename_conversation(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<RenameConversation>,
+) -> Result<impl IntoResponse, ApiError> {
+    nonempty(&input.title, MAX_TITLE_BYTES)?;
+    Ok(Json(
+        state.store.rename_conversation(id, &input.title).await?,
+    ))
+}
+
+async fn delete_conversation(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    state.store.delete_conversation(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn get_conversation(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,
@@ -294,8 +324,9 @@ async fn chat_snapshot(
     if title_pending {
         // A first message can commit while the run window is loading. Leave
         // room for its title, whose normalized characters need at most four
-        // bytes each in JSON, including escaped quotes and backslashes.
-        bytes += 4 * GENERATED_TITLE_CHARS;
+        // bytes each in JSON, including escaped quotes and backslashes, and
+        // for the microsecond fraction its new activity time can add.
+        bytes += 4 * GENERATED_TITLE_CHARS + ".000000".len();
     }
     let mut runs = Vec::new();
     {

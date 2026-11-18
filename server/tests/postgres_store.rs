@@ -1111,3 +1111,316 @@ async fn restoring_an_earlier_server_token_does_not_revive_its_sessions() {
     assert_eq!(found.id, current.id);
     fixture.cleanup().await;
 }
+
+async fn listed_ids(store: &Store) -> Vec<Uuid> {
+    store
+        .list_conversations(100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|conversation| conversation.id)
+        .collect()
+}
+
+#[tokio::test]
+async fn conversations_are_listed_by_last_activity() {
+    let f = Fixture::new().await;
+    let a = f.store.create_conversation("A").await.unwrap();
+    let b = f.store.create_conversation("B").await.unwrap();
+    let c = f.store.create_untitled_conversation().await.unwrap();
+    assert_eq!(a.last_activity_at, a.created_at);
+    assert_eq!(listed_ids(&f.store).await, [c.id, b.id, a.id]);
+
+    let first = f.store.enqueue(a.id, "first", "A の続き").await.unwrap();
+    assert_eq!(
+        f.store
+            .get_conversation(a.id)
+            .await
+            .unwrap()
+            .last_activity_at,
+        first.run.created_at
+    );
+    assert_eq!(listed_ids(&f.store).await, [a.id, c.id, b.id]);
+
+    // An exact retry and a stop are not new activity.
+    let retry = f.store.enqueue(a.id, "first", "A の続き").await.unwrap();
+    assert!(!retry.created);
+    f.store.request_cancel(first.run.id).await.unwrap();
+    assert_eq!(
+        f.store
+            .get_conversation(a.id)
+            .await
+            .unwrap()
+            .last_activity_at,
+        first.run.created_at
+    );
+
+    f.store.enqueue(b.id, "first", "B の続き").await.unwrap();
+    assert_eq!(listed_ids(&f.store).await, [b.id, a.id, c.id]);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn rename_sets_a_manual_title_that_the_first_message_keeps() {
+    let f = Fixture::new().await;
+    let untitled = f.store.create_untitled_conversation().await.unwrap();
+    let renamed = f
+        .store
+        .rename_conversation(untitled.id, " 旅の計画 ")
+        .await
+        .unwrap();
+    assert_eq!(renamed.title, "旅の計画");
+    assert_eq!(renamed.last_activity_at, untitled.last_activity_at);
+    let first = f
+        .store
+        .enqueue(untitled.id, "first", "京都に行きたい")
+        .await
+        .unwrap();
+    assert_eq!(first.conversation_title, "旅の計画");
+    assert_eq!(
+        f.store.get_conversation(untitled.id).await.unwrap().title,
+        "旅の計画"
+    );
+
+    let automatic = f.store.create_untitled_conversation().await.unwrap();
+    let titled = f
+        .store
+        .enqueue(automatic.id, "first", "自動の名前")
+        .await
+        .unwrap();
+    assert_eq!(titled.conversation_title, "自動の名前");
+    let manual = f
+        .store
+        .rename_conversation(automatic.id, "手動の名前")
+        .await
+        .unwrap();
+    assert_eq!(manual.title, "手動の名前");
+    assert_eq!(listed_ids(&f.store).await, [automatic.id, untitled.id]);
+
+    let longest = "名".repeat(200);
+    assert_eq!(
+        f.store
+            .rename_conversation(automatic.id, &longest)
+            .await
+            .unwrap()
+            .title,
+        longest
+    );
+    let too_long = "名".repeat(201);
+    for invalid in ["", " \t ", too_long.as_str()] {
+        assert!(matches!(
+            f.store.rename_conversation(automatic.id, invalid).await,
+            Err(StoreError::InvalidInput(_))
+        ));
+    }
+    assert!(matches!(
+        f.store.rename_conversation(Uuid::new_v4(), "x").await,
+        Err(StoreError::NotFound)
+    ));
+
+    // Whichever commits first, the manual name wins over the automatic one.
+    for attempt in 0..10 {
+        let conversation = f.store.create_untitled_conversation().await.unwrap();
+        let key = format!("race-{attempt}");
+        let (renamed, queued) = tokio::join!(
+            f.store.rename_conversation(conversation.id, "手動"),
+            f.store
+                .enqueue(conversation.id, &key, "自動になるかもしれない名前"),
+        );
+        renamed.unwrap();
+        queued.unwrap();
+        assert_eq!(
+            f.store
+                .get_conversation(conversation.id)
+                .await
+                .unwrap()
+                .title,
+            "手動"
+        );
+    }
+    f.cleanup().await;
+}
+
+async fn stored_rows(pool: &PgPool, conversation: Uuid, run: Uuid) -> [i64; 4] {
+    let mut rows = [0; 4];
+    for (count, (sql, id)) in rows.iter_mut().zip([
+        (
+            "SELECT count(*) FROM conversations WHERE id = $1",
+            conversation,
+        ),
+        (
+            "SELECT count(*) FROM runs WHERE conversation_id = $1",
+            conversation,
+        ),
+        ("SELECT count(*) FROM run_events WHERE run_id = $1", run),
+        (
+            "SELECT count(*) FROM tool_executions WHERE run_id = $1",
+            run,
+        ),
+    ]) {
+        *count = sqlx::query_scalar(sql)
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    }
+    rows
+}
+
+#[tokio::test]
+async fn delete_removes_only_that_conversation_and_its_records() {
+    let f = Fixture::new().await;
+    let owner = f.store.acquire_owner().await.unwrap();
+    let owner_id = owner.owner_id();
+    let mut stored = Vec::new();
+    for title in ["削除する", "残す"] {
+        let conversation = f.store.create_conversation(title).await.unwrap();
+        let run = f
+            .store
+            .enqueue(conversation.id, "first", title)
+            .await
+            .unwrap()
+            .run;
+        f.store.claim_next(owner_id).await.unwrap().unwrap();
+        f.store
+            .before_tool(run.id, owner_id, "call", "get_current_time", json!({}))
+            .await
+            .unwrap();
+        f.store
+            .after_tool(run.id, owner_id, "call", "12:00")
+            .await
+            .unwrap();
+        let finished = f
+            .store
+            .finish(run.id, owner_id, completed(vec![], "done"))
+            .await
+            .unwrap();
+        assert_eq!(finished.status, RunStatus::Completed);
+        stored.push((conversation.id, run.id));
+    }
+    let (deleted, deleted_run) = stored[0];
+    let (kept, kept_run) = stored[1];
+    let kept_before = stored_rows(&f.pool, kept, kept_run).await;
+    assert_eq!(kept_before[..2], [1, 1]);
+    assert!(kept_before[2] > 0);
+    assert_eq!(kept_before[3], 1);
+
+    f.store.delete_conversation(deleted).await.unwrap();
+    assert_eq!(stored_rows(&f.pool, deleted, deleted_run).await, [0; 4]);
+    assert_eq!(stored_rows(&f.pool, kept, kept_run).await, kept_before);
+    assert_eq!(listed_ids(&f.store).await, [kept]);
+    assert!(matches!(
+        f.store.get_conversation(deleted).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        f.store.delete_conversation(deleted).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        f.store.enqueue(deleted, "after", "deleted").await,
+        Err(StoreError::NotFound)
+    ));
+    owner.release().await.unwrap();
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn delete_is_refused_while_work_is_queued_running_or_unreviewed() {
+    let f = Fixture::new().await;
+    let owner = f.store.acquire_owner().await.unwrap();
+    let owner_id = owner.owner_id();
+    let conversation = f.store.create_conversation("busy").await.unwrap();
+    let refused = || async {
+        matches!(
+            f.store.delete_conversation(conversation.id).await,
+            Err(StoreError::Conflict(_))
+        )
+    };
+    let first = f
+        .store
+        .enqueue(conversation.id, "first", "work")
+        .await
+        .unwrap()
+        .run;
+    assert!(refused().await, "queued");
+    f.store.claim_next(owner_id).await.unwrap().unwrap();
+    assert!(refused().await, "running");
+    f.store.request_cancel(first.id).await.unwrap();
+    assert!(refused().await, "running with a stop requested");
+    let cancelled = f
+        .store
+        .finish(first.id, owner_id, completed(vec![], ""))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+
+    let second = f
+        .store
+        .enqueue(conversation.id, "second", "external work")
+        .await
+        .unwrap()
+        .run;
+    f.store.claim_next(owner_id).await.unwrap().unwrap();
+    f.store
+        .before_tool(second.id, owner_id, "unknown", "external_write", json!({}))
+        .await
+        .unwrap();
+    let uncertain = f
+        .store
+        .finish(second.id, owner_id, completed(vec![], "partial"))
+        .await
+        .unwrap();
+    assert_eq!(uncertain.status, RunStatus::Uncertain);
+    assert!(refused().await, "unreviewed uncertain");
+    f.store
+        .resolve_uncertain(second.id, uncertain.event_seq, "確認しました")
+        .await
+        .unwrap();
+    f.store.delete_conversation(conversation.id).await.unwrap();
+    assert!(listed_ids(&f.store).await.is_empty());
+    owner.release().await.unwrap();
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn delete_rechecks_blocking_work_after_waiting_for_the_lock() {
+    let f = Fixture::new().await;
+    let conversation = f.store.create_conversation("lock").await.unwrap();
+    let mut holder = f.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM conversations WHERE id = $1 FOR UPDATE")
+        .bind(conversation.id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let store = f.store.clone();
+    let deleting = tokio::spawn(async move { store.delete_conversation(conversation.id).await });
+    let mut waited = false;
+    for _ in 0..200 {
+        // Only this test's generated-schema sessions are inspected.
+        let blocked: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock'")
+            .bind(&f.schema)
+            .fetch_one(&f.admin)
+            .await
+            .unwrap();
+        if blocked == 1 {
+            waited = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(waited, "the delete waits for the conversation lock");
+    sqlx::query("INSERT INTO runs (id, conversation_id, idempotency_key, input_text, status) VALUES ($1, $2, 'raw', 'raw', 'queued')")
+        .bind(Uuid::new_v4())
+        .bind(conversation.id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    assert!(matches!(
+        deleting.await.unwrap(),
+        Err(StoreError::Conflict(_))
+    ));
+    assert_eq!(listed_ids(&f.store).await, [conversation.id]);
+    f.cleanup().await;
+}

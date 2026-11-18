@@ -26,6 +26,8 @@ struct OwnerState {
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const UNTITLED_CONVERSATION: &str = "新しい会話";
+/// Work that blocks both a new message and a delete in one conversation.
+const BLOCKING_WORK: &str = "SELECT EXISTS (SELECT 1 FROM runs WHERE conversation_id = $1 AND (status IN ('queued', 'running') OR (status = 'uncertain' AND reviewed_at IS NULL)))";
 pub(crate) const GENERATED_TITLE_CHARS: usize = 40;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, sqlx::Type)]
@@ -54,6 +56,8 @@ pub struct Conversation {
     pub id: Uuid,
     pub title: String,
     pub created_at: DateTime<Utc>,
+    /// Creation or the newest accepted message, whichever is later.
+    pub last_activity_at: DateTime<Utc>,
     #[serde(skip)]
     pub(crate) title_pending: bool,
 }
@@ -308,13 +312,8 @@ impl Store {
     }
 
     pub async fn create_conversation(&self, title: &str) -> Result<Conversation> {
-        let title = title.trim();
-        if title.is_empty() || title.chars().count() > 200 {
-            return Err(StoreError::InvalidInput(
-                "title must contain 1 to 200 characters",
-            ));
-        }
-        self.insert_conversation(title, false).await
+        self.insert_conversation(normalized_title(title)?, false)
+            .await
     }
 
     pub async fn create_untitled_conversation(&self) -> Result<Conversation> {
@@ -322,8 +321,9 @@ impl Store {
     }
 
     async fn insert_conversation(&self, title: &str, title_pending: bool) -> Result<Conversation> {
+        // A new conversation's activity is its creation.
         Ok(sqlx::query_as(
-            "INSERT INTO conversations (id, title, title_pending) VALUES ($1, $2, $3) RETURNING *",
+            "INSERT INTO conversations (id, title, title_pending, created_at, last_activity_at) SELECT $1, $2, $3, at, at FROM (SELECT clock_timestamp() AS at) AS created RETURNING *",
         )
         .bind(Uuid::new_v4())
         .bind(title)
@@ -342,14 +342,57 @@ impl Store {
 
     pub async fn list_conversations(&self, limit: i64) -> Result<Vec<Conversation>> {
         validate_limit(limit)?;
-        Ok(
-            sqlx::query_as(
-                "SELECT * FROM conversations ORDER BY created_at DESC, id DESC LIMIT $1",
-            )
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?,
+        Ok(sqlx::query_as(
+            "SELECT * FROM conversations ORDER BY last_activity_at DESC, id DESC LIMIT $1",
         )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// A manual name also ends automatic titling. The row lock orders this
+    /// with a first message, so the manual name wins in either commit order.
+    pub async fn rename_conversation(&self, id: Uuid, title: &str) -> Result<Conversation> {
+        sqlx::query_as(
+            "UPDATE conversations SET title = $2, title_pending = FALSE WHERE id = $1 RETURNING *",
+        )
+        .bind(id)
+        .bind(normalized_title(title)?)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::NotFound)
+    }
+
+    /// Permanently removes a conversation and all of its records. Enqueue
+    /// takes the same lock, so work cannot start while this is checked.
+    pub async fn delete_conversation(&self, id: Uuid) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM conversations WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        let blocked: bool = sqlx::query_scalar(BLOCKING_WORK)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if blocked {
+            return Err(StoreError::Conflict(
+                "conversation has unfinished or uncertain work",
+            ));
+        }
+        // No foreign key cascades: a child table added later must be listed
+        // here, or deletes fail instead of silently dropping its records.
+        for statement in [
+            "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE conversation_id = $1)",
+            "DELETE FROM tool_executions WHERE run_id IN (SELECT id FROM runs WHERE conversation_id = $1)",
+            "DELETE FROM runs WHERE conversation_id = $1",
+            "DELETE FROM conversations WHERE id = $1",
+        ] {
+            sqlx::query(statement).bind(id).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Stores a new browser session and prunes rows that ended a week ago.
@@ -475,8 +518,10 @@ impl Store {
                 conversation_title,
             });
         }
-        let unfinished: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runs WHERE conversation_id = $1 AND (status IN ('queued', 'running') OR (status = 'uncertain' AND reviewed_at IS NULL)))")
-            .bind(conversation_id).fetch_one(&mut *tx).await?;
+        let unfinished: bool = sqlx::query_scalar(BLOCKING_WORK)
+            .bind(conversation_id)
+            .fetch_one(&mut *tx)
+            .await?;
         if unfinished {
             return Err(StoreError::Conflict(
                 "conversation has unfinished or uncertain work",
@@ -484,6 +529,13 @@ impl Store {
         }
         let run: Run = sqlx::query_as("INSERT INTO runs (id, conversation_id, idempotency_key, input_text, status) VALUES ($1, $2, $3, $4, 'queued') RETURNING *")
             .bind(Uuid::new_v4()).bind(conversation_id).bind(key).bind(text).fetch_one(&mut *tx).await?;
+        sqlx::query(
+            "UPDATE conversations SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1",
+        )
+        .bind(conversation_id)
+        .bind(run.created_at)
+        .execute(&mut *tx)
+        .await?;
         if title_pending {
             conversation_title = title_from_message(text);
             sqlx::query("UPDATE conversations SET title = $2, title_pending = FALSE WHERE id = $1")
@@ -918,6 +970,16 @@ impl Store {
         }
         Ok(messages)
     }
+}
+
+fn normalized_title(title: &str) -> Result<&str> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 200 {
+        return Err(StoreError::InvalidInput(
+            "title must contain 1 to 200 characters",
+        ));
+    }
+    Ok(title)
 }
 
 fn title_from_message(message: &str) -> String {
