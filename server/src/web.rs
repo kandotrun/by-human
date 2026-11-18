@@ -15,9 +15,26 @@ pub fn router() -> Router<ApiState> {
         .route("/chat.css", get(styles))
         .route("/chat.js", get(script))
         .route("/markdown.js", get(markdown))
+        .route("/manifest.webmanifest", get(manifest))
+        .route(
+            "/icon-192.png",
+            get(|| icon(include_bytes!("../web/icons/icon-192.png"))),
+        )
+        .route(
+            "/icon-512.png",
+            get(|| icon(include_bytes!("../web/icons/icon-512.png"))),
+        )
+        .route(
+            "/apple-touch-icon.png",
+            get(|| icon(include_bytes!("../web/icons/apple-touch-icon.png"))),
+        )
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> Response {
+    bytes(content_type, body.as_bytes())
+}
+
+fn bytes(content_type: &'static str, body: &'static [u8]) -> Response {
     let mut response = body.into_response();
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -31,7 +48,7 @@ fn asset(content_type: &'static str, body: &'static str) -> Response {
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(
-            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         ),
     );
     response
@@ -53,6 +70,18 @@ async fn script() -> Response {
         "text/javascript; charset=utf-8",
         include_str!("../web/chat.js"),
     )
+}
+
+// Home-screen installation on iPhone and other browsers.
+async fn manifest() -> Response {
+    asset(
+        "application/manifest+json",
+        include_str!("../web/manifest.webmanifest"),
+    )
+}
+
+async fn icon(body: &'static [u8]) -> Response {
+    bytes("image/png", body)
 }
 
 async fn markdown() -> Response {

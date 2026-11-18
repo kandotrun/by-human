@@ -212,12 +212,19 @@ struct TestApp {
     runner: RunnerHandle,
 }
 
+#[derive(Clone, Copy)]
+enum Sessions {
+    Off,
+    Loopback,
+    Public(&'static str),
+}
+
 impl TestApp {
     async fn start(store: Store, model: Arc<dyn Model>) -> Self {
-        Self::start_with(store, model, true).await
+        Self::start_with(store, model, Sessions::Loopback).await
     }
 
-    async fn start_with(store: Store, model: Arc<dyn Model>, browser_sessions: bool) -> Self {
+    async fn start_with(store: Store, model: Arc<dyn Model>, sessions: Sessions) -> Self {
         let runner = Runner::start(
             store.clone(),
             Arc::new(Engine::new(model, Limits::default())),
@@ -229,10 +236,12 @@ impl TestApp {
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{addr}");
         let state = ApiState::new(store, TOKEN.into(), runner.notifier()).unwrap();
-        let app = router(if browser_sessions {
-            state.with_browser_origins(BrowserOrigins::loopback(addr))
-        } else {
-            state
+        let app = router(match sessions {
+            Sessions::Off => state,
+            Sessions::Loopback => state.with_browser_origins(BrowserOrigins::loopback(addr)),
+            Sessions::Public(origin) => state.with_browser_origins(
+                BrowserOrigins::loopback(addr).with_public(Some(origin.to_owned())),
+            ),
         });
         let stop_http = CancellationToken::new();
         let done = stop_http.clone();
@@ -1128,7 +1137,12 @@ async fn browser_sessions_need_the_token_and_an_allowed_origin_and_can_be_ended(
 #[tokio::test]
 async fn browser_sessions_are_unavailable_without_an_allowed_origin() {
     let db = Database::new().await;
-    let app = TestApp::start_with(db.store.clone(), Arc::new(HappyModel::default()), false).await;
+    let app = TestApp::start_with(
+        db.store.clone(),
+        Arc::new(HappyModel::default()),
+        Sessions::Off,
+    )
+    .await;
     let signed_in = app
         .client
         .post(format!("{}/v1/sessions", app.base))
@@ -1512,6 +1526,111 @@ async fn the_conversation_list_reports_when_older_ones_exist() {
     assert_eq!(more["has_more"], true);
     assert_eq!(more["conversations"].as_array().unwrap().len(), 100);
     assert_eq!(more["conversations"][0]["title"], "101 件目");
+    app.shutdown().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_configured_https_origin_signs_in_with_secure_cookies() {
+    const PUBLIC: &str = "https://mac.example.ts.net";
+    let db = Database::new().await;
+    let app = TestApp::start_with(
+        db.store.clone(),
+        Arc::new(HappyModel::default()),
+        Sessions::Public(PUBLIC),
+    )
+    .await;
+    let sign_in = |origin: &str| {
+        app.client
+            .post(format!("{}/v1/sessions", app.base))
+            .header("origin", origin)
+            .json(&json!({"token": TOKEN}))
+            .send()
+    };
+    let cookie_of = |response: &reqwest::Response| {
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        sign_in("http://mac.example.ts.net").await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    let local = sign_in(&app.base).await.unwrap();
+    assert_eq!(local.status(), StatusCode::OK);
+    assert!(!cookie_of(&local).contains("Secure"));
+    let public = sign_in(PUBLIC).await.unwrap();
+    assert_eq!(public.status(), StatusCode::OK);
+    let set_cookie = cookie_of(&public);
+    assert!(set_cookie.ends_with("; Path=/; HttpOnly; SameSite=Strict; Max-Age=34560000; Secure"));
+    let cookie = set_cookie.split(';').next().unwrap().to_owned();
+    let created = app
+        .client
+        .post(format!("{}/v1/conversations", app.base))
+        .header("cookie", &cookie)
+        .header("origin", PUBLIC)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let ended = app
+        .client
+        .delete(format!("{}/v1/session", app.base))
+        .header("cookie", &cookie)
+        .header("origin", PUBLIC)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ended.status(), StatusCode::NO_CONTENT);
+    assert!(cookie_of(&ended).ends_with("; Max-Age=0; Secure"));
+    app.shutdown().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_web_app_manifest_and_icons_are_served() {
+    let db = Database::new().await;
+    let app = TestApp::start(db.store.clone(), Arc::new(HappyModel::default())).await;
+    let get = |path: &str| app.client.get(format!("{}{path}", app.base)).send();
+    let shell = get("/").await.unwrap();
+    let csp = shell.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(csp.contains("manifest-src 'self'"));
+    let html = shell.text().await.unwrap();
+    assert!(html.contains(r#"<link rel="manifest" href="/manifest.webmanifest">"#));
+    assert!(html.contains(r#"<link rel="apple-touch-icon" href="/apple-touch-icon.png">"#));
+    let manifest = get("/manifest.webmanifest").await.unwrap();
+    assert_eq!(manifest.status(), StatusCode::OK);
+    assert_eq!(
+        manifest.headers()["content-type"],
+        "application/manifest+json"
+    );
+    let manifest: Value = manifest.json().await.unwrap();
+    assert_eq!(manifest["display"], "standalone");
+    assert_eq!(manifest["start_url"], "/");
+    assert_eq!(manifest["scope"], "/");
+    for icon in manifest["icons"].as_array().unwrap() {
+        let path = icon["src"].as_str().unwrap();
+        let response = get(path).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        let bytes = response.bytes().await.unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{path}");
+        let size = icon["sizes"].as_str().unwrap();
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        assert_eq!(format!("{width}x{width}"), size, "{path}");
+    }
+    let touch = get("/apple-touch-icon.png").await.unwrap();
+    assert_eq!(touch.status(), StatusCode::OK);
+    assert_eq!(
+        u32::from_be_bytes(touch.bytes().await.unwrap()[16..20].try_into().unwrap()),
+        180
+    );
     app.shutdown().await;
     db.cleanup().await;
 }

@@ -69,7 +69,7 @@ button, a, input, textarea { -webkit-tap-highlight-color: transparent; }
 button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 button { color: inherit; }
 [hidden] { display: none !important; }
-.app-shell { display: grid; grid-template-columns: 264px minmax(0, 1fr); height: 100dvh; min-height: 320px; }
+.app-shell { display: grid; grid-template-columns: 264px minmax(0, 1fr); height: var(--app-height, 100dvh); min-height: 320px; }
 .sidebar { display: flex; flex-direction: column; gap: 20px; padding: 26px 16px 16px; background: var(--sidebar); min-height: 0; border-right: 1px solid var(--line); }
 .sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 12px; }
 .wordmark { font-size: 23px; font-weight: 650; letter-spacing: -.9px; text-decoration: none; color: var(--ink); }
@@ -231,11 +231,15 @@ dialog::backdrop { background: #172a444d; backdrop-filter: blur(4px); }
   .message.user { max-width: 92%; }
   .message.assistant { margin-right: 0; }
   .composer-region { padding: 8px 12px max(10px, env(safe-area-inset-bottom)); }
+  .keyboard-open .composer-region { padding-bottom: 10px; }
   .composer-caption { display: none; }
   .composer textarea, .conversation-search input { font-size: 16px; }
   .notice { margin: 5px 16px 0; }
   .empty-state { padding: 14vh 25px 25px; }
   .dialog-content { padding: 23px; }
+}
+@media (hover: none) and (pointer: coarse) {
+  .composer-caption { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }

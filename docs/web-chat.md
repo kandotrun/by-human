@@ -14,9 +14,9 @@ about 30 days after its last use (use is recorded at most hourly), when you
 choose **ログアウト**, or for every browser when the server token is rotated, and
 a sign-in lasts at most 400 days. If loading fails while the session is valid,
 the page keeps it and offers 再試行 instead of asking for the token. Requests stay on the page's origin, and the
-server accepts browser changes only from its own loopback address. Use HTTPS for
-any non-loopback access; this change does not configure a public endpoint, TLS,
-CORS, device pairing or an iPhone adapter. See [browser sessions](http-api.md#browser-sessions).
+server accepts browser changes only from its own loopback address or the HTTPS
+origin set in `BY_HUMAN_PUBLIC_ORIGIN` (see [iPhone](#iphone)). The server does
+not configure TLS, CORS or device pairing itself. See [browser sessions](http-api.md#browser-sessions).
 
 The client supports new/existing conversations, Japanese multiline input,
 streamed replies, Stop, event-stream reconnection and per-conversation drafts.
@@ -73,6 +73,29 @@ same text and key. After a reload, an exact match in history confirms acceptance
 without another submission. Switching conversations, losing the event stream or
 closing the page does not cancel execution. Use **停止** to request cancellation.
 
+## iPhone
+
+The page can be added to the iPhone home screen, where it opens full screen
+with its own icon. On a phone, Return adds a line and the send button sends,
+and the layout keeps the composer above the on-screen keyboard.
+
+The iPhone needs HTTPS to reach the server. With Tailscale on both devices
+(MagicDNS and HTTPS certificates enabled for the tailnet):
+
+1. On the computer running by-human, publish the loopback listener inside your
+   tailnet: `tailscale serve --bg 4310`. It prints an address such as
+   `https://<machine>.<tailnet>.ts.net`.
+2. Set `BY_HUMAN_PUBLIC_ORIGIN` to exactly that address, without a trailing
+   slash, and restart `serve`. Browser sign-in is then also accepted from that
+   origin, and its session cookie is marked `Secure`.
+3. On the iPhone, open the address in Safari, sign in with the server token,
+   then choose Share → ホーム画面に追加.
+
+Tailscale Serve makes the page reachable by every device and user in your
+tailnet; the server token still protects all conversations. Never use
+`tailscale funnel`, which publishes to the internet. `tailscale serve reset`
+removes this machine's Serve configuration.
+
 ## Reviewing an uncertain run
 
 Interrupted external work can already have happened even when no receipt is
@@ -114,6 +137,11 @@ not an independent verification of external effects or a per-tool approval syste
 実行中の処理や確認待ちの結果がある会話は削除できません。
 一覧の上の検索欄では、タイトル・自分のメッセージ・返信の本文から会話を探せます。
 日本語の変換が確定してから検索し、一致した部分の前後を文字のまま表示します。
+
+iPhoneではホーム画面に追加して全画面で使えます。改行はReturn、送信は送信ボタンです。
+iPhoneからの接続にはHTTPSが必要です。Tailscale Serve（`tailscale serve --bg 4310`）で
+tailnet内に公開し、表示された`https://〜.ts.net`を`BY_HUMAN_PUBLIC_ORIGIN`に設定して
+`serve`を再起動してください。インターネットに公開する`tailscale funnel`は使いません。
 
 下書きと送信結果の確認待ちは、このタブのsessionStorageに保存します。
 送信結果が不明なときは、同じ送信IDで確認し、新しいIDで送り直しません。

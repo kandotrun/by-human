@@ -218,9 +218,11 @@ async fn start_session(
         )
         .await?;
     let mut response = Json(json!({"expires_at": session.expires_at})).into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, browser_session::session_cookie(&secret));
+    let secure = state.browser_origins.secure(&headers);
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        browser_session::session_cookie(&secret, secure),
+    );
     Ok(response)
 }
 
@@ -236,15 +238,17 @@ async fn session_status(Extension(auth): Extension<Authenticated>) -> Json<Value
 async fn end_session(
     State(state): State<ApiState>,
     Extension(auth): Extension<Authenticated>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let Authenticated::Browser { secret_hash, .. } = auth else {
         return Err(ApiError::bad_request("browser_session_required"));
     };
     state.store.revoke_browser_session(&secret_hash).await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, browser_session::expired_cookie());
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        browser_session::expired_cookie(state.browser_origins.secure(&headers)),
+    );
     Ok(response)
 }
 

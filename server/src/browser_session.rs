@@ -79,17 +79,19 @@ pub fn read_cookie(headers: &HeaderMap) -> CookieSecret {
     }
 }
 
-pub fn session_cookie(secret: &SessionSecret) -> HeaderValue {
-    cookie(&secret.encode(), COOKIE_MAX_AGE_SECS)
+/// `secure` adds the `Secure` attribute for a page served over HTTPS.
+pub fn session_cookie(secret: &SessionSecret, secure: bool) -> HeaderValue {
+    cookie(&secret.encode(), COOKIE_MAX_AGE_SECS, secure)
 }
 
-pub fn expired_cookie() -> HeaderValue {
-    cookie("", 0)
+pub fn expired_cookie(secure: bool) -> HeaderValue {
+    cookie("", 0, secure)
 }
 
-fn cookie(value: &str, max_age: i64) -> HeaderValue {
+fn cookie(value: &str, max_age: i64, secure: bool) -> HeaderValue {
+    let secure = if secure { "; Secure" } else { "" };
     HeaderValue::from_str(&format!(
-        "{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"
+        "{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
     ))
     .expect("session cookies contain only base64url header text")
 }
@@ -116,8 +118,29 @@ impl BrowserOrigins {
         Self(vec![direct, format!("http://localhost{port}")])
     }
 
+    /// Adds an HTTPS origin that proxies to the loopback listener, such as
+    /// Tailscale Serve. A listener without loopback origins gains nothing.
+    pub fn with_public(mut self, origin: Option<String>) -> Self {
+        if let Some(origin) = origin
+            && !self.0.is_empty()
+        {
+            self.0.push(origin);
+        }
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// True when the single allowed `Origin` is HTTPS, so cookies set for it
+    /// must be `Secure`. Loopback pages over HTTP keep cookies without it.
+    pub fn secure(&self, headers: &HeaderMap) -> bool {
+        self.allows(headers)
+            && headers
+                .get(header::ORIGIN)
+                .and_then(|origin| origin.to_str().ok())
+                .is_some_and(|origin| origin.starts_with("https://"))
     }
 
     /// True only for a single `Origin` header that exactly matches.
@@ -208,15 +231,49 @@ mod tests {
     fn cookies_are_http_only_strict_and_long_lived_handles() {
         let secret = SessionSecret::generate().unwrap();
         assert_eq!(
-            session_cookie(&secret).to_str().unwrap(),
+            session_cookie(&secret, false).to_str().unwrap(),
             format!(
                 "{COOKIE_NAME}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=34560000",
                 secret.encode()
             )
         );
         assert_eq!(
-            expired_cookie().to_str().unwrap(),
+            expired_cookie(false).to_str().unwrap(),
             format!("{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+        );
+        assert!(
+            session_cookie(&secret, true)
+                .to_str()
+                .unwrap()
+                .ends_with("; Max-Age=34560000; Secure")
+        );
+        assert!(
+            expired_cookie(true)
+                .to_str()
+                .unwrap()
+                .ends_with("; Max-Age=0; Secure")
+        );
+    }
+
+    #[test]
+    fn a_public_https_origin_joins_only_a_loopback_listener() {
+        let origin = |value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, HeaderValue::from_static(value));
+            headers
+        };
+        let public = Some("https://mac.example.ts.net".to_owned());
+        let origins = BrowserOrigins::loopback("127.0.0.1:4310".parse::<SocketAddr>().unwrap())
+            .with_public(public.clone());
+        assert!(origins.allows(&origin("https://mac.example.ts.net")));
+        assert!(origins.allows(&origin("http://127.0.0.1:4310")));
+        assert!(!origins.allows(&origin("http://mac.example.ts.net")));
+        assert!(origins.secure(&origin("https://mac.example.ts.net")));
+        assert!(!origins.secure(&origin("http://127.0.0.1:4310")));
+        assert!(
+            BrowserOrigins::loopback("0.0.0.0:4310".parse::<SocketAddr>().unwrap())
+                .with_public(public)
+                .is_empty()
         );
     }
 

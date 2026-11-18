@@ -1954,3 +1954,49 @@ test('a late search answer cannot bring back a conversation deleted elsewhere', 
     release();
   }
 });
+
+test.describe('on a phone', () => {
+  test.use({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true });
+
+  test('Return adds a line and the send button sends', async ({ page }) => {
+    await connect(page);
+    await page.locator('#open-sidebar').tap();
+    // Waits for the new conversation, not the one opened at sign-in.
+    await newConversation(page);
+    let sent = 0;
+    page.on('request', request => { if (/\/v1\/conversations\/[^/]+\/runs$/.test(request.url())) sent += 1; });
+    await composer(page).fill('一行目');
+    await composer(page).press('Enter');
+    await composer(page).pressSequentially('二行目');
+    await expect(composer(page)).toHaveValue('一行目\n二行目');
+    expect(sent).toBe(0);
+    await expect(page.locator('.composer-caption')).toBeHidden();
+    const response = page.waitForResponse(response => /\/v1\/conversations\/[^/]+\/runs$/.test(response.url()));
+    await page.getByRole('button', { name: '送信', exact: true }).tap();
+    expect((await response).status()).toBe(202);
+    await expect(userRows(page).last()).toHaveText('一行目\n二行目');
+  });
+
+  test('the layout fits the visible area above the keyboard', async ({ page }) => {
+    // iOS keeps the layout viewport and shrinks only the visual viewport.
+    await page.addInitScript(() => {
+      const visual = new EventTarget();
+      let height = null;
+      for (const [name, read] of [['height', () => height ?? window.innerHeight], ['width', () => window.innerWidth], ['scale', () => 1], ['offsetTop', () => 0]]) {
+        Object.defineProperty(visual, name, { get: read });
+      }
+      Object.defineProperty(window, 'visualViewport', { get: () => visual, configurable: true });
+      window.showKeyboard = value => { height = value; visual.dispatchEvent(new Event('resize')); };
+    });
+    await connect(page);
+    const shellHeight = () => page.locator('.app-shell').evaluate(node => node.getBoundingClientRect().height);
+    await expect.poll(shellHeight).toBe(852);
+    await page.evaluate(() => window.showKeyboard(500));
+    await expect.poll(shellHeight).toBe(500);
+    expect(await page.evaluate(() => window.innerHeight)).toBe(852);
+    await expect(page.locator('html')).toHaveClass(/keyboard-open/);
+    await page.evaluate(() => window.showKeyboard(null));
+    await expect.poll(shellHeight).toBe(852);
+    await expect(page.locator('html')).not.toHaveClass(/keyboard-open/);
+  });
+});
