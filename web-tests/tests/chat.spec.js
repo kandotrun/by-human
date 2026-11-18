@@ -2067,6 +2067,11 @@ test.describe('on a phone', () => {
     await page.evaluate(() => window.showKeyboard(250));
     await searchBox(page).fill(title);
     await expect(page.locator('#conversation-list [data-conversation-id]')).toHaveCount(1);
+    // Chromium would accept a tap under the emulated keyboard, so the result
+    // must first scroll into the 250px that stay visible.
+    await conversationButton(page, id).scrollIntoViewIfNeeded();
+    const result = await conversationButton(page, id).boundingBox();
+    expect(result.y + result.height).toBeLessThanOrEqual(250);
     await conversationButton(page, id).tap();
     await expect(conversationTitle(page)).toHaveText(title);
   });
