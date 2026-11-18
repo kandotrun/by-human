@@ -1893,7 +1893,8 @@ test('Escape during Japanese conversion in the search field keeps the drawer ope
   await expect(list).toBeVisible();
   await searchBox(page).fill('にほんご');
   await searchBox(page).dispatchEvent('compositionstart');
-  await searchBox(page).dispatchEvent('keydown', { key: 'Escape', code: 'Escape', isComposing: true, keyCode: 229 });
+  // Escape's own keyCode, so only isComposing marks it as part of conversion.
+  await searchBox(page).dispatchEvent('keydown', { key: 'Escape', code: 'Escape', isComposing: true, keyCode: 27 });
   await expect(list).toBeVisible();
   await expect(searchBox(page)).toHaveValue('にほんご');
   await searchBox(page).dispatchEvent('compositionend');
