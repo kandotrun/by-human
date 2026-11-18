@@ -1398,8 +1398,9 @@ $("open-sidebar").addEventListener("click", () => setDrawer(true));
 $("close-sidebar").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });
 $("drawer-backdrop").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });
 document.addEventListener("keydown", (event) => {
-  // Escape during IME conversion only cancels the conversion.
-  if (event.key !== "Escape" || event.isComposing || !$("sidebar").classList.contains("open")) return;
+  // Escape during IME conversion only cancels the conversion. Safari ends
+  // composition before that key, which then arrives with keyCode 229.
+  if (event.key !== "Escape" || event.isComposing || event.keyCode === 229 || !$("sidebar").classList.contains("open")) return;
   // Escape closes an open dialog or menu first, not the drawer behind it.
   if (document.querySelector("dialog[open]") || $("conversation-menu").matches(":popover-open")) return;
   setDrawer(false);

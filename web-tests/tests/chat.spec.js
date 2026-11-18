@@ -1877,4 +1877,8 @@ test('Escape during Japanese conversion in the search field keeps the drawer ope
   await expect(list).toBeVisible();
   await expect(searchBox(page)).toHaveValue('にほんご');
   await searchBox(page).dispatchEvent('compositionend');
+  // Safari ends composition first, so the key that ends it arrives as 229.
+  await searchBox(page).dispatchEvent('keydown', { key: 'Escape', code: 'Escape', isComposing: false, keyCode: 229 });
+  await expect(list).toBeVisible();
+  await expect(searchBox(page)).toHaveValue('にほんご');
 });
