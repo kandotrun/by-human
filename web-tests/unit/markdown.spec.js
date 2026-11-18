@@ -119,6 +119,9 @@ test('code paths, fences in lists, URLs in emphasis and table escapes', async ({
   expect(await html(page, '*a**b* **word**x')).toBe('<p><em>a**b</em> <strong>word</strong>x</p>');
   expect(await html(page, 'https://example.com:8443. と [https://example.com]')).toBe(
     `<p>${link('https://example.com:8443', 'https://example.com:8443')}. と [${link('https://example.com', 'https://example.com')}]</p>`);
+  expect(await html(page, '- ```\n  ---\n  code\nOutside')).toBe('<ul><li>' + code('', '---\ncode') + '</li></ul><p>Outside</p>');
+  expect(await html(page, '- item\n  | col |\n  | --- |\n  # Title\n  para\ncontinued')).toBe(
+    '<ul><li>item<div class="table-scroll"><table><thead><tr><th>col</th></tr></thead></table></div><h1>Title</h1>para<br>continued</li></ul>');
 });
 
 test('hostile input never creates active content', async ({ page }) => {

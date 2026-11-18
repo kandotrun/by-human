@@ -233,43 +233,50 @@ function parseList(lines, start, first, depth) {
     if (!item || item.ordered !== first.ordered || item.marker !== first.marker || isThematicBreak(lines[index])) break;
     const body = [];
     let fenceOpen = "";
+    let fenceQuotes = 0;
     let tableOpen = false;
     let paragraphOpen = false;
     let previous = "";
     // Lazy continuation is allowed only while the innermost open block is a
     // paragraph. Fences and tables are tracked through nested item and quote
-    // markers, so a block opened in a nested item also stops it.
+    // markers, so a block opened in a nested item also stops it. A fence ends
+    // only at a matching close inside the quotes it opened in; any other line,
+    // a rule or a list marker included, is code.
     const add = (content) => {
       body.push(content);
       let inner = trimLine(content);
-      if (isThematicBreak(inner)) {
-        fenceOpen = "";
+      if (!fenceOpen && isThematicBreak(inner)) {
         tableOpen = false;
         paragraphOpen = false;
         previous = "";
         return;
       }
+      // As in parseBlocks, table rows end at a blank line or a block start.
+      if (tableOpen && startsBlock(inner, depth + 1)) tableOpen = false;
       let offset = 0;
+      let quotes = 0;
       for (;;) {
         CONTAINER_MARKER.lastIndex = offset;
         const marker = CONTAINER_MARKER.exec(inner);
-        if (!marker || !marker[0]) break;
+        if (!marker || !marker[0] || (fenceOpen && (marker[0][0] !== ">" || quotes === fenceQuotes))) break;
+        if (marker[0][0] === ">") quotes += 1;
         offset = CONTAINER_MARKER.lastIndex;
       }
       inner = inner.slice(offset);
       const fence = /^(`{3,}|~{3,})/.exec(inner);
       if (fenceOpen) {
-        if (fence && fence[1][0] === fenceOpen[0] && fence[1].length >= fenceOpen.length && trimLine(inner).length === fence[1].length) fenceOpen = "";
+        if (quotes === fenceQuotes && fence && fence[1][0] === fenceOpen[0] && fence[1].length >= fenceOpen.length && trimLine(inner).length === fence[1].length) fenceOpen = "";
         paragraphOpen = false;
       } else if (fence && !(fence[1][0] === "`" && inner.slice(fence[1].length).includes("`"))) {
         fenceOpen = fence[1];
+        fenceQuotes = quotes;
         tableOpen = false;
         paragraphOpen = false;
       } else if (inner === "") {
         tableOpen = false;
         paragraphOpen = false;
       } else if (tableOpen || (previous.includes("|") && delimiterRow(inner))) {
-        // Table rows continue without pipes until a blank line.
+        // Table rows continue without pipes.
         tableOpen = true;
         paragraphOpen = false;
       } else {
