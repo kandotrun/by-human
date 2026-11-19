@@ -75,7 +75,7 @@ impl Config {
         let model = values
             .get("OPENAI_MODEL")
             .cloned()
-            .unwrap_or_else(|| "gpt-6.1-sol".to_owned());
+            .unwrap_or_else(|| "gpt-6.2-sol".to_owned());
         anyhow::ensure!(
             !model.trim().is_empty() && model.len() <= 128,
             "OPENAI_MODEL must be a model identifier"
@@ -144,6 +144,14 @@ mod tests {
         input.insert("BY_HUMAN_API_TOKEN".into(), "x".repeat(32));
         input.insert("OPENAI_API_KEY".into(), "x".repeat(32));
         assert!(Config::from_values(&input).is_err());
+    }
+
+    #[test]
+    fn the_model_defaults_to_gpt_6_2_sol_until_openai_model_names_another() {
+        let mut input = values();
+        assert_eq!(Config::from_values(&input).unwrap().model, "gpt-6.2-sol");
+        input.insert("OPENAI_MODEL".into(), "another-model".into());
+        assert_eq!(Config::from_values(&input).unwrap().model, "another-model");
     }
 
     #[test]
