@@ -70,6 +70,10 @@ test('large stored histories open and allow a new message', async ({ page }) => 
   const next = await send(page, 'ここから続けて');
   await expect.poll(async () => (await run(page, next.id)).status).toBe('completed');
   await expect(assistantRows(page).last()).toHaveText('こんにちは。「ここから続けて」を受け取りました。');
+  // Plain and Markdown replies share one reply bubble.
+  const backgrounds = await assistantRows(page).evaluateAll(nodes => nodes.map(node => getComputedStyle(node).backgroundColor));
+  expect(new Set(backgrounds).size).toBe(1);
+  expect(backgrounds[0]).not.toBe('rgba(0, 0, 0, 0)');
 });
 
 test('Japanese send has one transcript row, clears the draft and never stores the token', async ({ page }, testInfo) => {
@@ -941,4 +945,249 @@ test('the first streamed text updates only the reply in progress', async ({ page
   expect(await earlier.evaluate(node => node.isConnected)).toBe(true);
   await page.getByRole('button', { name: '停止', exact: true }).click();
   await expect.poll(async () => (await run(page, sent.id)).status).toBe('cancelled');
+});
+
+test('a status pill and typing dots show what the agent is doing', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const tool = await send(page, '復旧テスト');
+  await expect(page.locator('#run-progress')).toHaveText('ツールを実行中');
+  await expect(page.locator('#chat-log .typing')).toBeVisible();
+  // The dots sit in the reply bubble.
+  expect(await assistantRows(page).last().evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+  await page.getByRole('button', { name: '停止', exact: true }).click();
+  await expect.poll(async () => (await run(page, tool.id)).status).toBe('uncertain');
+  await expect(page.locator('#run-progress')).toBeHidden();
+  await expect(page.locator('#chat-log .typing')).toHaveCount(0);
+
+  await newConversation(page);
+  const streaming = await send(page, '停止テスト');
+  await expect(page.locator('#run-progress')).toHaveText('応答中');
+  await expect(page.locator('#chat-log .typing')).toHaveCount(0);
+  // Stop shows at once, before the server acknowledges it.
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  await page.route(`**/v1/runs/${streaming.id}/cancel`, async route => {
+    await held;
+    await route.continue();
+  });
+  try {
+    await page.getByRole('button', { name: '停止', exact: true }).click();
+    await expect(page.locator('#run-progress')).toHaveText('停止しています');
+  } finally {
+    release();
+  }
+  await expect.poll(async () => (await run(page, streaming.id)).status).toBe('cancelled');
+  await expect(page.locator('#run-progress')).toBeHidden();
+});
+
+test('the tool label survives an event stream reconnect', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const cursors = [];
+  let delivered;
+  await page.route(/\/v1\/runs\/[^/]+\/events$/, async route => {
+    cursors.push(route.request().headers()['last-event-id'] ?? '0');
+    if (cursors.length > 1) return route.continue();
+    // Deliver the stored events through tool.started, then end this stream.
+    const controller = new AbortController();
+    const response = await fetch(route.request().url(), { headers: auth, signal: controller.signal });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const isTool = event => /^event:\s*tool\.started$/m.test(event);
+    let buffer = '';
+    let events = [];
+    while (!events.some(isTool)) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error('the event stream ended before tool.started');
+      buffer += decoder.decode(value, { stream: true });
+      events = buffer.split(/\r?\n\r?\n/).slice(0, -1);
+    }
+    controller.abort();
+    events = events.slice(0, events.findIndex(isTool) + 1);
+    delivered = /^id:\s*(\d+)$/m.exec(events.at(-1))[1];
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: `${events.join('\n\n')}\n\n` });
+  });
+  const sent = await send(page, '復旧テスト');
+  try {
+    // The reconnect resumes after tool.started, so no new event restates it.
+    await expect.poll(() => cursors.length).toBe(2);
+    expect(cursors[1]).toBe(delivered);
+    await expect(page.locator('#run-progress')).toHaveText('ツールを実行中');
+  } finally {
+    await page.request.post(`/v1/runs/${sent.id}/cancel`, { headers: auth });
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe('uncertain');
+  }
+});
+
+test.describe('in UTC', () => {
+  test.use({ timezoneId: 'UTC' });
+
+  test('time separators label turns and a jump button returns to the latest reply', async ({ page }) => {
+    // Fixed send times and clock give the same labels on any test date.
+    const sentAt = ['2025-12-31T23:50:00Z', '2026-01-01T00:10:00Z', '2026-01-01T00:20:00Z'];
+    await page.clock.setFixedTime(new Date('2026-01-02T09:00:00Z'));
+    await page.setViewportSize({ width: 1280, height: 520 });
+    await connect(page);
+    await newConversation(page);
+    for (let index = 0; index < sentAt.length; index += 1) {
+      const sent = await send(page, 'Markdownテスト');
+      await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+    }
+    await page.route(/\/v1\/conversations\/[^/]+\/snapshot$/, async route => {
+      const response = await route.fetch();
+      const snapshot = await response.json();
+      // Snapshot runs are newest first.
+      snapshot.runs.forEach((item, index) => { item.created_at = sentAt.at(-1 - index); });
+      await route.fulfill({ response, json: snapshot });
+    });
+    await page.reload();
+    await expectSignedIn(page);
+    // An earlier year is named; a new day opens a group even within 30 minutes.
+    await expect(page.locator('#chat-log .time-separator')).toHaveText(['2025年12月31日 23:50', '1月1日 00:10']);
+    const area = page.locator('#message-area');
+    const jump = page.getByRole('button', { name: '最新のメッセージへ移動', exact: true });
+    await expect(jump).toBeHidden();
+    await area.evaluate(node => { node.scrollTop = 0; });
+    await expect(jump).toBeVisible();
+    await jump.click();
+    await expect.poll(() => area.evaluate(node => node.scrollHeight - node.scrollTop - node.clientHeight)).toBeLessThan(100);
+    await expect(jump).toBeHidden();
+  });
+});
+
+test('streamed text below the reader offers the jump button without moving them', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 520 });
+  await connect(page);
+  await newConversation(page);
+  for (let index = 0; index < 2; index += 1) {
+    const sent = await send(page, 'Markdownテスト');
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  }
+  const { promise: holdEvents, resolve: releaseEvents } = Promise.withResolvers();
+  await page.route('**/v1/runs/*/events', async route => {
+    await holdEvents;
+    await route.continue();
+  });
+  const sent = await send(page, '停止テスト');
+  const reply = page.locator(`#chat-log [data-role="assistant"][data-run-id="${sent.id}"]`);
+  const area = page.locator('#message-area');
+  const jump = page.getByRole('button', { name: '最新のメッセージへ移動', exact: true });
+  try {
+    await expect(reply.locator('.typing')).toBeVisible();
+    await expect(jump).toBeHidden();
+    // After pending scroll events, a shorter viewport, such as an on-screen
+    // keyboard, leaves the reader 150 px above the latest text without one.
+    await area.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+    await page.setViewportSize({ width: 1280, height: 370 });
+    const top = await area.evaluate(node => node.scrollTop);
+    releaseEvents();
+    await expect(reply).toHaveText('停止操作を待っています。');
+    await expect(jump).toBeVisible();
+    expect(await area.evaluate(node => node.scrollTop)).toBe(top);
+  } finally {
+    releaseEvents();
+    await page.request.post(`/v1/runs/${sent.id}/cancel`, { headers: auth });
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe('cancelled');
+  }
+});
+
+test('the chat follows the system dark theme', async ({ page }) => {
+  const shade = (locator, pseudo) => locator.evaluate((node, pseudo) => {
+    const [red, green, blue, alpha = 1] = getComputedStyle(node, pseudo).backgroundColor.match(/[\d.]+/g).map(Number);
+    return { brightest: Math.max(red, green, blue), darkest: Math.min(red, green, blue), alpha };
+  }, pseudo);
+  const canvas = () => shade(page.locator('html'));
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.goto('/');
+  await expect(signInDialog(page)).toBeVisible();
+  // Dialogs dim the dark page with a dark backdrop.
+  const backdrop = await shade(signInDialog(page), '::backdrop');
+  expect(backdrop.brightest).toBeLessThan(30);
+  expect(backdrop.alpha).toBeGreaterThan(0.5);
+  await connect(page, false);
+  const dark = await canvas();
+  expect(dark.alpha).toBe(1);
+  expect(dark.brightest).toBeLessThan(60);
+  await page.emulateMedia({ colorScheme: 'light' });
+  const light = await canvas();
+  expect(light.alpha).toBe(1);
+  expect(light.darkest).toBeGreaterThan(200);
+});
+
+test('text and controls keep WCAG contrast in light and dark themes', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  // A reply with a quote, quoted code, a link and linked code, from the real renderer.
+  await page.evaluate(async () => {
+    const { renderMarkdown } = await import('/markdown.js');
+    const reply = document.createElement('div');
+    reply.className = 'message assistant markdown';
+    reply.dataset.contrastSample = '';
+    reply.append(renderMarkdown('> 引用と `引用内のコード`\n\n[リンク](https://example.com) と [`リンクのコード`](https://example.com)'));
+    document.getElementById('chat-log').append(reply);
+  });
+  // After a key press, programmatic focus shows the keyboard focus ring.
+  await page.keyboard.press('Shift');
+  const failures = () => page.evaluate(() => {
+    const $ = selector => document.querySelector(selector);
+    const channels = color => {
+      const srgb = /^color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)(?: \/ ([\d.]+))?\)$/.exec(color);
+      if (srgb) return [...srgb.slice(1, 4).map(value => Number(value) * 255), Number(srgb[4] ?? 1)];
+      const [red, green, blue, alpha = 1] = color.match(/[\d.]+/g).map(Number);
+      return [red, green, blue, alpha];
+    };
+    const luminance = color => {
+      const [red, green, blue, alpha] = channels(color);
+      if (alpha !== 1) throw new Error(`translucent colour ${color}`);
+      const [r, g, b] = [red, green, blue].map(value => {
+        const channel = value / 255;
+        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const ratio = (first, second) => {
+      const [lighter, darker] = [luminance(first), luminance(second)].sort((a, b) => b - a);
+      return (lighter + 0.05) / (darker + 0.05);
+    };
+    // Text and edges sit on the first opaque background at or above them.
+    const backdrop = node => {
+      for (let current = node; current; current = current.parentElement) {
+        const color = getComputedStyle(current).backgroundColor;
+        if (channels(color)[3] > 0) return color;
+      }
+      throw new Error('no opaque background');
+    };
+    const sample = $('[data-contrast-sample]');
+    const text = (name, node, pseudo = null) => [name, getComputedStyle(node, pseudo).color, backdrop(node), 4.5];
+    $('#message').focus();
+    const composerEdge = getComputedStyle($('.composer')).borderTopColor;
+    $('#new-chat').focus();
+    if (!$('#new-chat').matches(':focus-visible')) throw new Error('the focus ring is not shown');
+    const ring = getComputedStyle($('#new-chat')).outlineColor;
+    const fieldEdge = getComputedStyle($('#server-token')).borderTopColor;
+    const surfaces = [['canvas', document.documentElement], ['sidebar', $('.sidebar')], ['surface', $('.composer')], ['reply', sample]];
+    const pairs = [
+      text('composer placeholder', $('#message'), '::placeholder'),
+      text('review note placeholder', $('#review-note'), '::placeholder'),
+      text('sidebar status', $('#connection-state')),
+      text('sidebar storage link', $('#storage-info')),
+      text('composer caption', $('.composer-caption span')),
+      text('quote', sample.querySelector('blockquote p')),
+      text('quoted code', sample.querySelector('blockquote code')),
+      text('link', sample.querySelector('a')),
+      text('linked code', sample.querySelector('a code')),
+      // Focus indicators and field edges need 3:1 against what they touch.
+      ...surfaces.map(([where, node]) => [`focus ring on ${where}`, ring, backdrop(node), 3]),
+      ['focused composer edge outside', composerEdge, backdrop($('.composer').parentElement), 3],
+      ['focused composer edge inside', composerEdge, backdrop($('.composer')), 3],
+      ['dialog field edge outside', fieldEdge, backdrop($('#server-token').parentElement), 3],
+      ['dialog field edge inside', fieldEdge, backdrop($('#server-token')), 3],
+    ];
+    return pairs.filter(([, foreground, background, minimum]) => ratio(foreground, background) < minimum)
+      .map(([name, foreground, background]) => `${name}: ${ratio(foreground, background).toFixed(2)} for ${foreground} on ${background}`);
+  });
+  for (const colorScheme of ['light', 'dark']) {
+    await page.emulateMedia({ colorScheme });
+    expect.soft(await failures(), colorScheme).toEqual([]);
+  }
 });

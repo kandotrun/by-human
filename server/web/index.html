@@ -20,14 +20,17 @@
       <div class="sidebar-footer">
         <span class="connection-state" id="connection-state">未ログイン</span>
         <button class="text-button" id="disconnect" type="button" disabled>ログアウト</button>
+        <button class="text-button storage-link" id="storage-info" type="button">このタブの保存について</button>
       </div>
     </aside>
     <button class="drawer-backdrop" id="drawer-backdrop" type="button" aria-label="会話一覧を閉じる" hidden></button>
     <main class="workspace">
       <header class="conversation-heading">
         <button class="icon-button mobile-only" id="open-sidebar" type="button" aria-label="会話一覧を開く" aria-expanded="false" aria-controls="sidebar">☰</button>
-        <h1 id="conversation-title">会話</h1>
-        <span id="run-progress" class="run-progress" role="status" aria-live="polite"></span>
+        <div class="title-stack">
+          <h1 id="conversation-title">会話</h1>
+          <span id="run-progress" class="status-pill" role="status" aria-live="polite" hidden></span>
+        </div>
       </header>
       <div class="notice" id="notice" role="status" hidden></div>
       <div class="visually-hidden" id="copy-status" role="status"></div>
@@ -40,6 +43,7 @@
         <div class="chat-log" id="chat-log" role="log" aria-label="会話のメッセージ" aria-live="off"></div>
       </section>
       <div class="composer-region">
+        <button class="jump-latest" id="jump-latest" type="button" aria-label="最新のメッセージへ移動" hidden><span aria-hidden="true">↓</span></button>
         <div id="run-actions" class="run-actions"></div>
         <form id="composer-form" class="composer">
           <label class="visually-hidden" for="message">メッセージ</label>
@@ -47,7 +51,7 @@
           <button id="send" class="send-button" type="submit" aria-label="送信" disabled><span aria-hidden="true">↑</span></button>
           <button id="stop" class="stop-button" type="button" hidden>停止</button>
         </form>
-        <div class="composer-caption"><span>Enterで送信 · Shift＋Enterで改行</span><button class="text-button" id="storage-info" type="button">このタブの保存について</button></div>
+        <div class="composer-caption"><span>Enterで送信 · Shift＋Enterで改行</span></div>
       </div>
     </main>
   </div>
