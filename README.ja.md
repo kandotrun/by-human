@@ -167,6 +167,9 @@ cargo run -p by-human -- mcp list
 
 `mcp list`は接続して有効なツールをJSONで表示し、切断します。ツールは実行せず、データベースもChatGPTのログインも不要です。`serve`は起動時に同じファイルを読み込むので、変更したら再起動してください。stdioのサーバーは自分と同じユーザーで動き、サンドボックスではありません。信頼できるプログラムだけを指定してください。stdioのサーバーが受け取る環境変数は、by-humanから引き継ぐ`PATH`（設定されている場合）と、`env`に書いたもの（この例では`NOTES_TOKEN`）だけです。`env`に書いた変数は、by-humanを動かす環境で設定しておかないと起動に失敗します。HTTPのサーバーにはHTTPS（ローカルならループバックのHTTP）で接続し、`bearer_token_env`で指定したトークンだけを使います。詳しくは[MCP tools](docs/mcp.md)を参照してください。
 
+> [!WARNING]
+> Web検索でエージェントが読むページは、信頼できない入力です。ページの内容に誘導されて、モデルがMCPツールを呼び出し、その結果や会話に書いた内容を、検索語や開くページのアドレス、返信内のリンクに含めてしまうことがあります。MCPツールで個人的なデータを読めるようにしている場合は、`BY_HUMAN_WEB_SEARCH=off`にしてください。OpenAIも、公開されたWebの検索と個人的なデータの参照は別々の要求で行うよう[勧めています](https://developers.openai.com/api/docs/guides/tools-connectors-mcp#prompt-injection)。
+
 ## 🧭 しくみ
 
 ```mermaid

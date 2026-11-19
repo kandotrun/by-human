@@ -182,6 +182,10 @@ Each variable named in `env` must be set where by-human runs, or startup fails.
 HTTP servers use HTTPS (or loopback HTTP) and only the bearer token named in `bearer_token_env`.
 Details: [MCP tools](docs/mcp.md).
 
+> [!WARNING]
+> Pages the agent reads during a web search are untrusted. A page can steer the model into calling your MCP tools and putting what they return, or what you wrote in the conversation, into search queries, page addresses it opens or links in its reply.
+> If your MCP tools can read private data, set `BY_HUMAN_WEB_SEARCH=off`. OpenAI [recommends](https://developers.openai.com/api/docs/guides/tools-connectors-mcp#prompt-injection) keeping public web search and private lookups in separate requests.
+
 ## 🧭 How it works
 
 ```mermaid
