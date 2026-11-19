@@ -63,6 +63,10 @@ test('large stored histories open and allow a new message', async ({ page }) => 
   await expect(page.getByText('古い履歴の一部は省略されています。')).toHaveCount(1);
   await expect(userRows(page).first()).not.toHaveText('依頼 1');
   await expect(userRows(page).last()).toHaveText('依頼 9');
+  // Replies this long stay one plain text node instead of rendering Markdown.
+  const plain = await assistantRows(page).evaluateAll(nodes => nodes.map(node =>
+    node.classList.contains('plain') && node.childNodes.length === 1 && node.firstChild.nodeType === Node.TEXT_NODE));
+  expect(plain).toEqual(Array(await userRows(page).count()).fill(true));
   const next = await send(page, 'ここから続けて');
   await expect.poll(async () => (await run(page, next.id)).status).toBe('completed');
   await expect(assistantRows(page).last()).toHaveText('こんにちは。「ここから続けて」を受け取りました。');

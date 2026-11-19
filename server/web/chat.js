@@ -202,6 +202,17 @@ function runStatus(run) {
   return "";
 }
 
+// Rendering megabytes of Markdown blocks the page, so a reply longer than this
+// stays one plain text node. Copying always uses the raw text.
+const MARKDOWN_LIMIT = 65_536;
+
+function renderReply(reply, text) {
+  const plain = text.length > MARKDOWN_LIMIT;
+  reply.classList.toggle("markdown", !plain);
+  reply.classList.toggle("plain", plain);
+  reply.replaceChildren(plain ? text : renderMarkdown(text));
+}
+
 function renderMessages(forceScroll = false) {
   const area = $("message-area");
   const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
@@ -217,10 +228,10 @@ function renderMessages(forceScroll = false) {
     turn.append(user);
     // An active run always has a reply node, so streamed text updates in place.
     if (run.output_text || active(run)) {
-      const assistant = element("div", "message assistant markdown");
+      const assistant = element("div", "message assistant");
       assistant.dataset.role = "assistant";
       assistant.dataset.runId = run.id;
-      assistant.append(renderMarkdown(run.output_text));
+      renderReply(assistant, run.output_text);
       turn.append(assistant);
       if (!active(run)) {
         const actions = element("div", "message-actions");
@@ -317,7 +328,7 @@ function renderStreamingReply() {
   if (!reply || !active(run)) return;
   const area = $("message-area");
   const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
-  reply.replaceChildren(renderMarkdown(run.output_text));
+  renderReply(reply, run.output_text);
   if (nearBottom) area.scrollTop = area.scrollHeight;
 }
 
