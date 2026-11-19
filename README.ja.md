@@ -198,7 +198,7 @@ flowchart LR
 | `DATABASE_URL` | `check`と`serve`で必須 | by-human用のPostgreSQLデータベース |
 | `BY_HUMAN_API_TOKEN` | `serve`で必須 | チャット画面とHTTP API用のサーバートークン |
 | `BY_HUMAN_LISTEN` | `127.0.0.1:4310` | 待ち受けるアドレスとポート |
-| `OPENAI_MODEL` | `gpt-6.1-sol` | 返信を書くモデル |
+| `OPENAI_MODEL` | `gpt-6.2-sol` | 返信を書くモデル |
 | `BY_HUMAN_OPENAI_AUTH` | `chatgpt` | `chatgpt`はプランを使う。`api-key`はAPIの従量課金を明示的に選ぶ |
 | `OPENAI_API_KEY` | 未設定 | `BY_HUMAN_OPENAI_AUTH=api-key`のときだけ読む |
 | `BY_HUMAN_AUTH_DIR` | `~/.config/by-human` | ChatGPTのログイン情報を置く、所有者専用のフォルダ |

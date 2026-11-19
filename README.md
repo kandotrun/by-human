@@ -217,7 +217,7 @@ The page shows the reply and the progress; reasoning and raw tool output never a
 | `DATABASE_URL` | required by `check` and `serve` | The PostgreSQL database for by-human |
 | `BY_HUMAN_API_TOKEN` | required by `serve` | The server token for the chat page and the HTTP API |
 | `BY_HUMAN_LISTEN` | `127.0.0.1:4310` | The address and port to listen on |
-| `OPENAI_MODEL` | `gpt-6.1-sol` | The model that writes the replies |
+| `OPENAI_MODEL` | `gpt-6.2-sol` | The model that writes the replies |
 | `BY_HUMAN_OPENAI_AUTH` | `chatgpt` | `chatgpt` uses your plan; `api-key` opts in to API billing |
 | `OPENAI_API_KEY` | unset | Read only when `BY_HUMAN_OPENAI_AUTH=api-key` |
 | `BY_HUMAN_AUTH_DIR` | `~/.config/by-human` | The owner-only folder that holds the ChatGPT sign-in |
