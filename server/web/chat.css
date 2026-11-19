@@ -69,7 +69,7 @@ button, a, input, textarea { -webkit-tap-highlight-color: transparent; }
 button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 button { color: inherit; }
 [hidden] { display: none !important; }
-.app-shell { display: grid; grid-template-columns: 264px minmax(0, 1fr); height: 100dvh; min-height: 320px; }
+.app-shell { display: grid; grid-template-columns: 264px minmax(0, 1fr); height: var(--app-height, 100dvh); min-height: 320px; }
 .sidebar { display: flex; flex-direction: column; gap: 20px; padding: 26px 16px 16px; background: var(--sidebar); min-height: 0; border-right: 1px solid var(--line); }
 .sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 12px; }
 .wordmark { font-size: 23px; font-weight: 650; letter-spacing: -.9px; text-decoration: none; color: var(--ink); }
@@ -169,7 +169,7 @@ button { color: inherit; }
 .jump-latest { position: absolute; top: -46px; left: 50%; transform: translateX(-50%); z-index: 2; width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--ink); box-shadow: 0 6px 18px var(--shadow); font-size: 18px; line-height: 1; }
 .composer { display: flex; align-items: flex-end; gap: 12px; padding: 10px 10px 10px 17px; border: 1px solid var(--line); border-radius: 24px; background: var(--surface); box-shadow: 0 6px 24px var(--shadow); }
 .composer:focus-within { border-color: var(--focus); }
-.composer textarea { width: 100%; resize: none; border: 0; outline: none; background: transparent; color: var(--ink); padding: 6px 0; min-height: 38px; max-height: min(30dvh, 220px); line-height: 1.6; overflow-y: auto; }
+.composer textarea { width: 100%; resize: none; border: 0; outline: none; background: transparent; color: var(--ink); padding: 6px 0; min-height: 38px; max-height: min(calc(var(--app-height, 100dvh) * .3), 220px); line-height: 1.6; overflow-y: auto; }
 .composer textarea:focus-visible { outline: none; }
 textarea::placeholder, input::placeholder { color: var(--placeholder); }
 .send-button { border: 0; border-radius: 50%; flex: 0 0 38px; width: 38px; height: 38px; background: var(--accent-vivid); color: var(--accent-ink); font-size: 28px; line-height: 1; }
@@ -220,8 +220,10 @@ dialog::backdrop { background: #172a444d; backdrop-filter: blur(4px); }
   .app-shell { display: flex; }
   .workspace { flex: 1; }
   .mobile-only { display: inline-flex; }
-  .sidebar { position: fixed; inset: 0 auto 0 0; width: min(300px, calc(100% - 52px)); z-index: 4; transform: translateX(-100%); padding-top: max(22px, env(safe-area-inset-top)); transition: transform .18s ease; visibility: hidden; }
+  .sidebar { position: fixed; inset: 0 auto auto 0; height: var(--app-height, 100dvh); width: min(300px, calc(100% - 52px)); z-index: 4; transform: translateX(-100%); padding-top: max(22px, env(safe-area-inset-top)); transition: transform .18s ease; visibility: hidden; overflow-y: auto; }
   .sidebar.open { transform: translateX(0); visibility: visible; }
+  /* The list keeps about three rows; a shorter keyboard scrolls the whole drawer. */
+  .conversation-list { min-height: 144px; }
   .drawer-backdrop:not([hidden]) { display: block; position: fixed; inset: 0; z-index: 3; background: #1f232847; border: 0; }
   .conversation-heading { display: grid; grid-template-columns: 40px minmax(0, 1fr) 40px; padding: max(10px, env(safe-area-inset-top)) 14px 6px; gap: 8px; min-height: 60px; }
   .title-stack { align-items: center; text-align: center; }
@@ -231,11 +233,21 @@ dialog::backdrop { background: #172a444d; backdrop-filter: blur(4px); }
   .message.user { max-width: 92%; }
   .message.assistant { margin-right: 0; }
   .composer-region { padding: 8px 12px max(10px, env(safe-area-inset-bottom)); }
+  .keyboard-open .composer-region { padding-bottom: 10px; }
   .composer-caption { display: none; }
   .composer textarea, .conversation-search input { font-size: 16px; }
   .notice { margin: 5px 16px 0; }
   .empty-state { padding: 14vh 25px 25px; }
   .dialog-content { padding: 23px; }
+}
+@media (hover: none) and (pointer: coarse) {
+  /* However little the keyboard leaves visible, the send button stays in it. */
+  .app-shell { min-height: 0; }
+  .composer-caption { display: none; }
+  /* iOS zooms into any focused field smaller than 16px and stays zoomed. */
+  input, textarea { font-size: 16px !important; }
+  /* Dialogs sit at the top and end 12px above the keyboard, so their buttons stay visible. */
+  dialog { margin: max(12px, env(safe-area-inset-top)) auto auto; max-height: calc(var(--app-height, 100dvh) - max(12px, env(safe-area-inset-top)) - 12px); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }

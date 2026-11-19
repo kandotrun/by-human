@@ -98,7 +98,11 @@ cookie.
 
 - The request must carry exactly one `Origin` that matches the page's own
   loopback address (`http://127.0.0.1:<port>` or `http://localhost:<port>` for
-  the bound listener); anything else returns `403`.
+  the bound listener) or `BY_HUMAN_PUBLIC_ORIGIN`; anything else returns `403`.
+  `BY_HUMAN_PUBLIC_ORIGIN` is one exact `https://` origin, such as Tailscale
+  Serve's `https://<machine>.<tailnet>.ts.net`, that proxies to a loopback
+  listener; it is ignored for other listeners. Cookies set for an `https`
+  origin, including the expired one from sign-out, carry `Secure`.
 - A cookie-authenticated request other than `GET`/`HEAD` must carry the same
   kind of allowed `Origin`, or it returns `403`. Bearer requests do not need one.
 - A request with an `Authorization` header is judged only as bearer; an invalid

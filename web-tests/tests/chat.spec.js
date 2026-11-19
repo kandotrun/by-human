@@ -1954,3 +1954,125 @@ test('a late search answer cannot bring back a conversation deleted elsewhere', 
     release();
   }
 });
+
+test('a desktop window shorter than the layout still scrolls to the composer', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 200 });
+  await connect(page);
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeInViewport();
+});
+
+test.describe('on a phone', () => {
+  test.use({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true });
+  // iOS keeps the layout viewport and shrinks only the visual viewport.
+  const emulateKeyboard = page => page.addInitScript(() => {
+    const visual = new EventTarget();
+    let height = null;
+    for (const [name, read] of [['height', () => height ?? window.innerHeight], ['width', () => window.innerWidth], ['scale', () => 1], ['offsetTop', () => 0]]) {
+      Object.defineProperty(visual, name, { get: read });
+    }
+    Object.defineProperty(window, 'visualViewport', { get: () => visual, configurable: true });
+    window.showKeyboard = value => { height = value; visual.dispatchEvent(new Event('resize')); };
+  });
+
+  test('Return adds a line and the send button sends', async ({ page }) => {
+    await connect(page);
+    await page.locator('#open-sidebar').tap();
+    // Waits for the new conversation, not the one opened at sign-in.
+    await newConversation(page);
+    let sent = 0;
+    page.on('request', request => { if (/\/v1\/conversations\/[^/]+\/runs$/.test(request.url())) sent += 1; });
+    await composer(page).fill('一行目');
+    await composer(page).press('Enter');
+    await composer(page).pressSequentially('二行目');
+    await expect(composer(page)).toHaveValue('一行目\n二行目');
+    expect(sent).toBe(0);
+    await expect(page.locator('.composer-caption')).toBeHidden();
+    const response = page.waitForResponse(response => /\/v1\/conversations\/[^/]+\/runs$/.test(response.url()));
+    await page.getByRole('button', { name: '送信', exact: true }).tap();
+    expect((await response).status()).toBe(202);
+    await expect(userRows(page).last()).toHaveText('一行目\n二行目');
+  });
+
+  test('fields do not trigger iOS zoom and dialogs stay above the keyboard', async ({ page }) => {
+    await page.goto('/');
+    const dialog = signInDialog(page);
+    await expect(dialog).toBeVisible();
+    // iOS zooms into focused fields under 16px and keeps the page zoomed.
+    for (const selector of ['#server-token', '#message', '#conversation-query', '#rename-input', '#review-note']) {
+      expect(await page.locator(selector).evaluate(node => getComputedStyle(node).fontSize), selector).toBe('16px');
+    }
+    expect((await dialog.boundingBox()).y).toBeLessThan(40);
+  });
+
+  test('a tall dialog below the notch stays above the keyboard', async ({ page }) => {
+    await emulateKeyboard(page);
+    // A Dynamic Island iPhone's safe area pushes the dialog 59px down.
+    const session = await page.context().newCDPSession(page);
+    await session.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 59, bottom: 34, left: 0, right: 0 } });
+    await page.goto('/');
+    const dialog = signInDialog(page);
+    await expect(dialog).toBeVisible();
+    await page.evaluate(() => window.showKeyboard(300));
+    const box = await dialog.boundingBox();
+    expect(box.y).toBe(59);
+    // It keeps a 12px gap above the keyboard.
+    expect(box.y + box.height).toBeLessThanOrEqual(300 - 12);
+  });
+
+  test('the layout fits the visible area above the keyboard', async ({ page }) => {
+    await emulateKeyboard(page);
+    await connect(page);
+    const shellHeight = () => page.locator('.app-shell').evaluate(node => node.getBoundingClientRect().height);
+    await expect.poll(shellHeight).toBe(852);
+    await page.evaluate(() => window.showKeyboard(500));
+    await expect.poll(shellHeight).toBe(500);
+    expect(await page.evaluate(() => window.innerHeight)).toBe(852);
+    await expect(page.locator('html')).toHaveClass(/keyboard-open/);
+    // A small phone can leave less than the 320px desktop minimum visible,
+    // with a draft of several lines from Return.
+    await expect(composer(page)).toBeEnabled();
+    await composer(page).fill(Array.from({ length: 12 }, (_, line) => `行${line + 1}`).join('\n'));
+    await page.evaluate(() => window.showKeyboard(250));
+    const send = await page.getByRole('button', { name: '送信', exact: true }).boundingBox();
+    expect(send.y + send.height).toBeLessThanOrEqual(250);
+    await expect.poll(shellHeight).toBe(250);
+    await page.evaluate(() => window.showKeyboard(null));
+    await expect.poll(shellHeight).toBe(852);
+    await expect(page.locator('html')).not.toHaveClass(/keyboard-open/);
+  });
+
+  test('the drawer fits the visible area above the search keyboard', async ({ page }) => {
+    await emulateKeyboard(page);
+    await connect(page);
+    await page.locator('#open-sidebar').tap();
+    await page.locator('#conversation-query').tap();
+    await page.evaluate(() => window.showKeyboard(400));
+    // The list then scrolls within the visible area, not behind the keyboard.
+    await expect.poll(() => page.locator('#sidebar').evaluate(node => node.getBoundingClientRect().bottom)).toBe(400);
+  });
+
+  test('a search result opens from the drawer when the keyboard leaves 250px', async ({ page }) => {
+    await emulateKeyboard(page);
+    const suffix = Date.now().toString(36);
+    const title = `鍵盤の上の検索${suffix}`;
+    const id = await createTitled(page, title);
+    // Sign-in opens the newest conversation, not the one searched for.
+    await createTitled(page, `後から作った会話${suffix}`);
+    await connect(page);
+    await expect(conversationTitle(page)).toHaveText(`後から作った会話${suffix}`);
+    await page.locator('#open-sidebar').tap();
+    await searchBox(page).tap();
+    // The drawer's own controls are taller than what is left visible.
+    await page.evaluate(() => window.showKeyboard(250));
+    await searchBox(page).fill(title);
+    await expect(page.locator('#conversation-list [data-conversation-id]')).toHaveCount(1);
+    // Chromium would accept a tap under the emulated keyboard, so the result
+    // must first scroll into the 250px that stay visible.
+    await conversationButton(page, id).scrollIntoViewIfNeeded();
+    const result = await conversationButton(page, id).boundingBox();
+    expect(result.y + result.height).toBeLessThanOrEqual(250);
+    await conversationButton(page, id).tap();
+    await expect(conversationTitle(page)).toHaveText(title);
+  });
+});

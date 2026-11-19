@@ -199,11 +199,18 @@ async fn serve() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("HTTP listener address is unavailable"))?;
     let runner = Runner::start(store.clone(), engine, shutdown.clone()).await?;
     let fatal = runner.fatal_token();
+    let origins = by_human::browser_session::BrowserOrigins::loopback(listening_at)
+        .with_public(config.public_origin.clone());
+    if let Some(origin) = &config.public_origin {
+        if origins.is_empty() {
+            println!("by-human: BY_HUMAN_PUBLIC_ORIGIN is ignored without a loopback listener");
+        } else {
+            println!("by-human: browser sign-in is also accepted from {origin}");
+        }
+    }
     let state = ApiState::new(store, config.api_token, runner.notifier())
         .map_err(|message| anyhow::anyhow!("{message}"))?
-        .with_browser_origins(by_human::browser_session::BrowserOrigins::loopback(
-            listening_at,
-        ));
+        .with_browser_origins(origins);
     let http_shutdown = shutdown.clone();
     let mut http = tokio::spawn(async move {
         axum::serve(listener, api::router(state))

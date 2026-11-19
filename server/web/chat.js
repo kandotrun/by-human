@@ -71,6 +71,8 @@ const sending = new Map();
 // one again.
 const forgotten = new Set();
 const isSending = () => sending.has(selectedId);
+// On phones Return adds a line and the send button sends.
+const touchInput = matchMedia("(hover: none) and (pointer: coarse)");
 
 class ApiError extends Error {
   constructor(status) {
@@ -1396,7 +1398,7 @@ $("message").addEventListener("input", () => {
 $("message").addEventListener("compositionstart", () => { composition = true; });
 $("message").addEventListener("compositionend", () => { composition = false; });
 $("message").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing && !composition && event.keyCode !== 229) {
+  if (event.key === "Enter" && !touchInput.matches && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing && !composition && event.keyCode !== 229) {
     event.preventDefault();
     $("composer-form").requestSubmit();
   }
@@ -1476,6 +1478,23 @@ $("review-acknowledgment").addEventListener("change", updateReviewButton);
 $("review-form").addEventListener("submit", resolve);
 $("storage-info").addEventListener("click", () => $("storage-dialog").showModal());
 $("close-storage").addEventListener("click", () => $("storage-dialog").close());
+// iOS keeps the layout viewport behind the on-screen keyboard, so the app
+// takes the visible height and the composer stays above the keyboard.
+function fitViewport() {
+  const visual = window.visualViewport;
+  if (!visual || visual.scale > 1.01) return;
+  document.documentElement.style.setProperty("--app-height", `${visual.height}px`);
+  document.documentElement.classList.toggle("keyboard-open", window.innerHeight - visual.height > 120);
+  if (touchInput.matches && window.scrollY) window.scrollTo(0, 0);
+}
+window.visualViewport?.addEventListener("resize", fitViewport);
+// On touch devices the shell fits the visible area and never needs page
+// scrolling; iOS can still scroll it while the keyboard or a dialog moves
+// focus, which would hide the header. A short desktop window keeps scrolling.
+window.addEventListener("scroll", () => {
+  if (touchInput.matches && window.scrollY && !(window.visualViewport?.scale > 1.01)) window.scrollTo(0, 0);
+}, { passive: true });
+fitViewport();
 restoreSession();
 render();
 if (secureOrigin()) resumeSession();

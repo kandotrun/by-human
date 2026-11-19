@@ -10,6 +10,9 @@ pub struct Config {
     pub openai_auth: AuthMode,
     pub openai_api_key: Option<String>,
     pub model: String,
+    /// An HTTPS page origin that proxies to the loopback listener, such as
+    /// `https://<machine>.<tailnet>.ts.net` from Tailscale Serve.
+    pub public_origin: Option<String>,
 }
 
 impl Config {
@@ -21,6 +24,7 @@ impl Config {
             "OPENAI_API_KEY",
             "OPENAI_MODEL",
             "BY_HUMAN_OPENAI_AUTH",
+            "BY_HUMAN_PUBLIC_ORIGIN",
         ]
         .into_iter()
         .filter_map(|name| {
@@ -76,6 +80,21 @@ impl Config {
             !model.trim().is_empty() && model.len() <= 128,
             "OPENAI_MODEL must be a model identifier"
         );
+        let public_origin = match values.get("BY_HUMAN_PUBLIC_ORIGIN").map(String::as_str) {
+            None | Some("") => None,
+            Some(value) => {
+                // Browsers send the canonical form, so only that form can match.
+                let canonical = reqwest::Url::parse(value)
+                    .ok()
+                    .filter(|url| url.scheme() == "https")
+                    .map(|url| url.origin().ascii_serialization());
+                anyhow::ensure!(
+                    canonical.as_deref() == Some(value),
+                    "BY_HUMAN_PUBLIC_ORIGIN must be an exact https origin such as https://<machine>.<tailnet>.ts.net"
+                );
+                Some(value.to_owned())
+            }
+        };
         Ok(Self {
             database_url,
             listen,
@@ -83,6 +102,7 @@ impl Config {
             openai_auth,
             openai_api_key,
             model,
+            public_origin,
         })
     }
 
@@ -147,6 +167,40 @@ mod tests {
         for invalid in ["あ".repeat(32), "x".repeat(513), "x ".repeat(16)] {
             input.insert("BY_HUMAN_API_TOKEN".into(), invalid);
             assert!(Config::from_values(&input).is_err());
+        }
+    }
+
+    #[test]
+    fn an_optional_public_origin_must_be_an_exact_https_origin() {
+        let mut input = values();
+        assert!(Config::from_values(&input).unwrap().public_origin.is_none());
+        for valid in [
+            "https://mac.example.ts.net",
+            "https://mac.example.ts.net:8443",
+        ] {
+            input.insert("BY_HUMAN_PUBLIC_ORIGIN".into(), valid.into());
+            assert_eq!(
+                Config::from_values(&input)
+                    .unwrap()
+                    .public_origin
+                    .as_deref(),
+                Some(valid)
+            );
+        }
+        for invalid in [
+            "http://mac.example.ts.net",
+            "https://mac.example.ts.net/",
+            "https://mac.example.ts.net/chat",
+            "https://Mac.example.ts.net",
+            "https://user@mac.example.ts.net",
+            "https://mac.example.ts.net:443",
+            "mac.example.ts.net",
+            "https://",
+            " ",
+        ] {
+            input.insert("BY_HUMAN_PUBLIC_ORIGIN".into(), invalid.into());
+            let error = Config::from_values(&input).err().unwrap().to_string();
+            assert!(!error.contains("mac.example"), "{invalid}");
         }
     }
 
