@@ -4,6 +4,7 @@
 //! https://developers.openai.com/api/docs/guides/function-calling
 //! https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
 //! https://developers.openai.com/api/reference/resources/responses/streaming-events
+//! https://developers.openai.com/api/docs/guides/tools-web-search
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -25,6 +26,8 @@ use super::{
 
 /// The tool name that run events report for OpenAI's hosted web search.
 const WEB_SEARCH: &str = "web_search";
+/// Added to the instructions only while the hosted web search is offered.
+const WEB_SEARCH_INSTRUCTIONS: &str = "You can search the web for current or external information. Cite the sources you use inline as Markdown links. Never claim that you searched the web unless search results are present.";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -41,7 +44,10 @@ pub struct ProviderConfig {
     pub max_output_tokens: u32,
     pub request_timeout: Duration,
     pub max_stream_bytes: usize,
+    /// Requests add web search guidance while `web_search` is on.
     pub instructions: String,
+    /// Offer OpenAI's hosted web search. It runs at OpenAI, never locally.
+    pub web_search: bool,
 }
 
 impl ProviderConfig {
@@ -51,6 +57,7 @@ impl ProviderConfig {
             max_output_tokens: 1024, request_timeout: Duration::from_secs(60),
             max_stream_bytes: 2 * 1024 * 1024,
             instructions: "You are by-human, the user's personal agent. Be clear and helpful. Use get_current_time when current UTC time is needed. Never claim that a tool ran unless its result is present.".into(),
+            web_search: false,
         }
     }
 }
@@ -88,6 +95,7 @@ impl OpenAIProvider {
                 request_timeout: self.config.request_timeout,
                 max_stream_bytes: self.config.max_stream_bytes,
                 instructions: self.config.instructions.clone(),
+                web_search: self.config.web_search,
             },
             endpoint: self.endpoint.clone(),
             client: self.client.clone(),
@@ -159,14 +167,21 @@ impl OpenAIProvider {
                 })
             })
             .collect();
-        let tools = match self.config.auth_mode {
+        let mut tools = match self.config.auth_mode {
             AuthMode::ApiKey => functions,
             AuthMode::ChatGptPlan => vec![json!({
                 "type": "namespace", "name": "by_human", "description": "Configured by-human tools", "tools": functions
             })],
         };
+        let mut instructions = self.config.instructions.clone();
+        if self.config.web_search {
+            // A namespace holds only function and custom tools, so the hosted
+            // search is always a top-level sibling.
+            tools.push(json!({ "type": "web_search" }));
+            instructions = format!("{instructions} {WEB_SEARCH_INSTRUCTIONS}");
+        }
         let mut body = json!({
-            "model": self.config.model, "instructions": self.config.instructions,
+            "model": self.config.model, "instructions": instructions,
             "input": input, "tools": tools, "store": false, "stream": true,
             "include": ["reasoning.encrypted_content"], "parallel_tool_calls": false
         });

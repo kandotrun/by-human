@@ -1341,3 +1341,66 @@ async fn a_search_cut_short_fails_and_a_stopped_search_is_cancelled() {
     assert_eq!(sink.before.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn web_search_is_a_hosted_sibling_tool_and_the_instructions_follow_it() {
+    for mode in [AuthMode::ApiKey, AuthMode::ChatGptPlan] {
+        for enabled in [true, false] {
+            let fixture = Fixture::start(vec![vec![complete(vec![message("ok")])]]).await;
+            let mut config = ProviderConfig::new("fixture-model".into(), "fixture-secret".into());
+            config.auth_mode = mode;
+            config.web_search = enabled;
+            // A refreshed plan token keeps every request option.
+            let provider = OpenAIProvider::for_loopback_test(config, &fixture.url)
+                .unwrap()
+                .with_access_token("fixture-refreshed")
+                .unwrap();
+            Engine::new(Arc::new(provider), Limits::default())
+                .run(input(), &Sink::default(), CancellationToken::new())
+                .await
+                .unwrap();
+            let requests = fixture.state.requests.lock().unwrap();
+            let request = &requests[0];
+            let tools = request["tools"].as_array().unwrap();
+            let search = json!({"type": "web_search"});
+            // The hosted tool is a top-level sibling, never a namespaced function.
+            assert_eq!(
+                tools.iter().filter(|tool| **tool == search).count(),
+                usize::from(enabled),
+                "{mode:?}"
+            );
+            if enabled {
+                assert_eq!(tools.last(), Some(&search));
+            }
+            let functions = if mode == AuthMode::ChatGptPlan {
+                assert_eq!(tools.len(), 1 + usize::from(enabled));
+                assert_eq!(tools[0]["type"], "namespace");
+                tools[0]["tools"].as_array().unwrap().clone()
+            } else {
+                tools[..tools.len() - usize::from(enabled)].to_vec()
+            };
+            assert_eq!(functions.len(), 1);
+            assert_eq!(functions[0]["type"], "function");
+            assert_eq!(functions[0]["name"], "get_current_time");
+            assert_eq!(request["include"], json!(["reasoning.encrypted_content"]));
+            let instructions = request["instructions"].as_str().unwrap();
+            assert!(instructions.contains("Use get_current_time when current UTC time is needed."));
+            assert_eq!(instructions.to_lowercase().contains("web"), enabled);
+            assert_eq!(
+                instructions
+                    .contains("You can search the web for current or external information."),
+                enabled
+            );
+            assert_eq!(
+                instructions.contains("Cite the sources you use inline as Markdown links."),
+                enabled
+            );
+            assert_eq!(
+                instructions.contains(
+                    "Never claim that you searched the web unless search results are present."
+                ),
+                enabled
+            );
+        }
+    }
+}

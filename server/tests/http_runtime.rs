@@ -254,6 +254,7 @@ impl ScriptedResponses {
     fn model(&self) -> Arc<dyn Model> {
         let mut config = ProviderConfig::new("fixture-model".into(), "fixture-secret".into());
         config.auth_mode = AuthMode::ChatGptPlan;
+        config.web_search = true;
         Arc::new(OpenAIProvider::for_loopback_test(config, &self.url).unwrap())
     }
 }
