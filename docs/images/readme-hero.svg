@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 560" width="1280" height="560" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">by-human: your own AI agent, on your own computer</title>
+  <desc id="hero-desc">The orange by-human app icon beside a browser window at 127.0.0.1:4310. The window shows the chat: conversations grouped by day in the sidebar, and a reply streaming in with a status pill reading 応答中 (replying), a Markdown table, a checklist and a Stop button. An iPhone at the right shows the same chat answering what time it is with the clock tool.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFF9F3"/>
+      <stop offset="1" stop-color="#FDE6D3"/>
+    </linearGradient>
+    <linearGradient id="icon" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF8A2E"/>
+      <stop offset="1" stop-color="#F06306"/>
+    </linearGradient>
+    <filter id="lift" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#7A3B10" flood-opacity="0.16"/>
+    </filter>
+    <filter id="lift-small" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#2A1608" flood-opacity="0.22"/>
+    </filter>
+    <clipPath id="window">
+      <rect x="470" y="64" width="636" height="432" rx="20"/>
+    </clipPath>
+    <clipPath id="screen">
+      <rect x="1090" y="182" width="150" height="340" rx="25"/>
+    </clipPath>
+  </defs>
+  <style>
+    text { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", Meiryo, Helvetica, Arial, sans-serif; fill: #1F2328; }
+    .muted { fill: #5F646C; }
+    .faint { fill: #6C7179; }
+    .accent { fill: #C2410C; }
+    .bold { font-weight: 700; }
+    .semi { font-weight: 600; }
+    .line { fill: none; stroke: #E6E3DD; }
+  </style>
+
+  <rect width="1280" height="560" rx="32" fill="url(#bg)"/>
+  <circle cx="1220" cy="36" r="190" fill="#F76707" opacity="0.07"/>
+  <circle cx="40" cy="566" r="220" fill="#F76707" opacity="0.06"/>
+
+  <!-- App icon and name -->
+  <g transform="translate(84 92)">
+    <rect width="208" height="208" rx="48" fill="url(#icon)" filter="url(#lift)"/>
+    <g transform="scale(0.40625)" fill="none" stroke="#FFFAF5" stroke-width="58" stroke-linecap="round">
+      <path d="M170 120V392"/>
+      <circle cx="256" cy="306" r="86"/>
+    </g>
+  </g>
+  <text x="82" y="374" font-size="54" class="bold" letter-spacing="-1.2">by-human</text>
+  <text x="85" y="420" font-size="21" class="muted">
+    <tspan x="85">Your own AI agent,</tspan>
+    <tspan x="85" dy="30">on your own computer.</tspan>
+  </text>
+
+  <!-- Browser window with the embedded chat -->
+  <rect x="470" y="64" width="636" height="432" rx="20" fill="#FFFFFF" filter="url(#lift)"/>
+  <g clip-path="url(#window)">
+    <rect x="470" y="64" width="636" height="44" fill="#F3F2EF"/>
+    <path d="M470 108.5H1106" class="line"/>
+    <circle cx="494" cy="86" r="6" fill="#FF5F57"/>
+    <circle cx="514" cy="86" r="6" fill="#FEBC2E"/>
+    <circle cx="534" cy="86" r="6" fill="#28C840"/>
+    <rect x="638.5" y="74.5" width="300" height="23" rx="11.5" fill="#FFFFFF" stroke="#E6E3DD"/>
+    <text x="788" y="90.5" font-size="12.5" class="muted" text-anchor="middle">127.0.0.1:4310</text>
+
+    <!-- Sidebar -->
+    <rect x="470" y="109" width="184" height="387" fill="#F3F2EF"/>
+    <path d="M654.5 109V496" class="line"/>
+    <text x="488" y="142" font-size="17" class="bold" letter-spacing="-0.4">by-human</text>
+    <rect x="486.5" y="155.5" width="152" height="31" rx="10" fill="#FFFFFF" stroke="#E6E3DD"/>
+    <path d="M495 171h11M500.5 165.5v11" stroke="#C2410C" stroke-width="2.2" stroke-linecap="round"/>
+    <text x="514" y="175.5" font-size="12.5" class="semi">新しい会話</text>
+    <rect x="486.5" y="195.5" width="152" height="27" rx="9" fill="#FFFFFF" stroke="#E6E3DD"/>
+    <text x="498" y="213.5" font-size="11.5" class="faint">会話を検索</text>
+    <text x="490" y="246" font-size="10.5" class="muted semi">今日</text>
+    <rect x="482" y="254" width="160" height="30" rx="9" fill="#FFFFFF"/>
+    <text x="492" y="273.5" font-size="12" class="accent semi">来週の大阪出張の準…</text>
+    <text x="620" y="272" font-size="12" class="muted">⋯</text>
+    <text x="492" y="306" font-size="12">いま何時？</text>
+    <text x="490" y="340" font-size="10.5" class="muted semi">昨日</text>
+    <text x="492" y="366" font-size="12">週末に読む本を3冊選…</text>
+    <text x="492" y="394" font-size="12">引っ越しの手続きを…</text>
+    <text x="490" y="428" font-size="10.5" class="muted semi">過去 7 日間</text>
+    <text x="492" y="454" font-size="12">PostgreSQL のバック…</text>
+    <text x="492" y="482" font-size="12">英語のメールを自然…</text>
+
+    <!-- Conversation -->
+    <rect x="655" y="109" width="451" height="387" fill="#FAFAF8"/>
+    <text x="676" y="142" font-size="14.5" class="bold">来週の大阪出張の準備を手伝って</text>
+    <rect x="676.5" y="152.5" width="74" height="21" rx="10.5" fill="#FFFFFF" stroke="#E6E3DD"/>
+    <circle cx="689" cy="163" r="7" fill="#F76707" opacity="0.18"/>
+    <circle cx="689" cy="163" r="3.6" fill="#F76707"/>
+    <text x="699" y="167" font-size="11" class="muted">応答中</text>
+    <text x="880" y="198" font-size="10" class="muted" text-anchor="middle">15:27</text>
+    <rect x="880" y="210" width="204" height="30" rx="15" fill="#EFECE6"/>
+    <text x="892" y="229.5" font-size="12">来週の大阪出張の準備を手伝って</text>
+
+    <rect x="676" y="252" width="330" height="186" rx="16" fill="#F3F2EF"/>
+    <text x="692" y="279" font-size="14" class="bold">大阪出張の準備</text>
+    <rect x="692.5" y="290.5" width="298" height="22" fill="#FFFFFF"/>
+    <rect x="692.5" y="290.5" width="298" height="88" fill="none" stroke="#E2DED7"/>
+    <path d="M774.5 290.5V378.5M878.5 290.5V378.5M692.5 312.5H990.5M692.5 334.5H990.5M692.5 356.5H990.5" fill="none" stroke="#E2DED7"/>
+    <text font-size="10.5" class="bold">
+      <tspan x="700" y="305.5">日にち</tspan><tspan x="782" y="305.5">予定</tspan><tspan x="886" y="305.5">メモ</tspan>
+    </text>
+    <text font-size="10.5">
+      <tspan x="700" y="327.5">11/25（水）</tspan><tspan x="782" y="327.5">移動・打ち合わせ</tspan><tspan x="886" y="327.5">新幹線は 8:30 発</tspan>
+      <tspan x="700" y="349.5">11/26（木）</tspan><tspan x="782" y="349.5">展示会</tspan><tspan x="886" y="349.5">名刺を多めに</tspan>
+      <tspan x="700" y="371.5">11/27（金）</tspan><tspan x="782" y="371.5">帰京</tspan><tspan x="886" y="371.5">17 時ごろ出発</tspan>
+    </text>
+    <rect x="692" y="391" width="11" height="11" rx="2.5" fill="#C9C5BE"/>
+    <path d="M694.6 396.6l2.2 2.2 3.8-4.4" fill="none" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="710" y="401" font-size="11.5">新幹線とホテルの予約</text>
+    <rect x="692.5" y="413.5" width="10" height="10" rx="2.5" fill="#FFFFFF" stroke="#8A8F96"/>
+    <text x="710" y="423" font-size="11.5" class="bold">展示会の資料を印刷</text>
+    <rect x="818" y="412" width="2" height="13" rx="1" fill="#F76707"/>
+
+    <rect x="676.5" y="450.5" width="408" height="33" rx="16.5" fill="#FFFFFF" stroke="#E6E3DD"/>
+    <text x="695" y="471.5" font-size="11.5" class="faint">メッセージを入力</text>
+    <rect x="1010.5" y="456.5" width="66" height="21" rx="10.5" fill="#FFFFFF" stroke="#E6E3DD"/>
+    <rect x="1021" y="463" width="8" height="8" rx="1.6" fill="#C2410C"/>
+    <text x="1035" y="471" font-size="11" class="accent semi">停止</text>
+  </g>
+  <rect x="470.5" y="64.5" width="635" height="431" rx="19.5" fill="none" stroke="#E6E3DD"/>
+
+  <!-- iPhone with the same chat -->
+  <rect x="1084" y="176" width="162" height="352" rx="31" fill="#1F2328" filter="url(#lift-small)"/>
+  <rect x="1090" y="182" width="150" height="340" rx="25" fill="#FAFAF8"/>
+  <g clip-path="url(#screen)">
+    <text x="1108" y="199" font-size="9.5" class="semi">15:27</text>
+    <rect x="1145" y="190" width="40" height="11" rx="5.5" fill="#1F2328"/>
+    <rect x="1205.5" y="192.5" width="15" height="7.5" rx="2" fill="none" stroke="#1F2328" stroke-width="1"/>
+    <rect x="1207" y="194" width="10" height="4.5" rx="1" fill="#1F2328"/>
+    <circle cx="1110" cy="226" r="11" fill="#FFFFFF" stroke="#E6E3DD"/>
+    <path d="M1105 222.5h10M1105 226h10M1105 229.5h10" stroke="#1F2328" stroke-width="1.3" stroke-linecap="round"/>
+    <text x="1171" y="230" font-size="10.5" class="bold" text-anchor="middle">いま何時？</text>
+    <text x="1165" y="254" font-size="8" class="muted" text-anchor="middle">15:27</text>
+    <rect x="1170" y="264" width="60" height="22" rx="11" fill="#EFECE6"/>
+    <text x="1179" y="278.5" font-size="10">いま何時？</text>
+    <rect x="1098" y="296" width="132" height="62" rx="12" fill="#F3F2EF"/>
+    <text font-size="8.6">
+      <tspan x="1107" y="313">時計ツールで確認しました。</tspan>
+      <tspan x="1107" y="328">いまは日本時間で</tspan>
+      <tspan x="1107" y="343" class="bold">15時27分</tspan><tspan class="bold" dx="0"> </tspan><tspan>です。</tspan>
+    </text>
+    <text x="1104" y="372" font-size="7.5" class="muted">コピー</text>
+    <rect x="1098.5" y="478.5" width="133" height="27" rx="13.5" fill="#FFFFFF" stroke="#E6E3DD"/>
+    <text x="1110" y="495.5" font-size="8.5" class="faint">メッセージを入力</text>
+    <circle cx="1218" cy="492" r="9.5" fill="#D5D2CC"/>
+    <path d="M1218 497v-9M1214.2 491.6l3.8-3.8 3.8 3.8" fill="none" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="1135" y="512" width="60" height="3.5" rx="1.75" fill="#1F2328" opacity="0.85"/>
+  </g>
+</svg>
