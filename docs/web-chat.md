@@ -29,13 +29,17 @@ and task items, quotes, tables, inline and fenced code, and links limited to
 parses HTML, so HTML in a reply stays text, images appear as links and other
 link schemes as plain text. Each code block and reply has a copy button. Your
 own messages, and replies longer than 65,536 characters, stay plain text.
+When the agent searches the web, the reply cites its sources inline as links.
 
 While a reply runs, a status pill under the title shows 考えています, the tool in
-use (時刻を確認中, or `<server> のツールを実行中` for MCP tools) or 応答中, and
-typing dots fill the gap before the first token. A time label opens each
-conversation and marks gaps of 30 minutes or a new day. When you scroll up, a
-button returns to the latest reply. The layout follows the system light or dark
-theme.
+use (時刻を確認中, Web を検索中 while it searches the web, or
+`<server> のツールを実行中` for MCP tools) or 応答中, and typing dots fill the
+gap before the first token. The pill returns to 考えています when a search ends,
+and a reconnected or reloaded page shows the same label. A web search runs at
+OpenAI and leaves no tool record, so stopping it during a search ends the reply
+as 停止しました without a review. A time label opens each conversation and
+marks gaps of 30 minutes or a new day. When you scroll up, a button returns to
+the latest reply. The layout follows the system light or dark theme.
 
 The sidebar lists conversations by their latest activity (creation or an
 accepted message) under 今日, 昨日, 過去 7 日間 and then month headings, in the
@@ -126,10 +130,12 @@ not an independent verification of external effects or a per-tool approval syste
 最初のメッセージが受け付けられると、その内容をもとにタイトルが付きます。
 
 返信は見出し・リスト・表・コードなどのMarkdownで表示し、コードと返信本文はコピーできます。
+Web検索を使った返信は、出典をリンクで示します。
 返信内のHTMLは実行せずに文字として表示し、画像は読み込まずリンクとして表示します。
 65,536文字を超える長い返信は、Markdownにせずそのまま文字で表示します。
-応答中はタイトルの下に「考えています」「時刻を確認中」「応答中」などの状態を表示し、
-画面はシステムのライト／ダーク設定に合わせます。
+応答中はタイトルの下に「考えています」「時刻を確認中」「Web を検索中」「応答中」などの
+状態を表示し、画面はシステムのライト／ダーク設定に合わせます。Web検索はOpenAI側で実行され
+ツールの実行記録を残さないため、検索中に停止しても確認は不要です。
 
 会話一覧は最後のやり取りが新しい順に並び、「今日」「昨日」「過去 7 日間」と月ごとに
 まとめて表示します。各会話の「⋯」から名前の変更と削除ができます。
