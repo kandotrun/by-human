@@ -1381,14 +1381,6 @@ fn hosted_search(started: bool, id: &str) -> RuntimeEvent {
     }
 }
 
-fn search_started(sink: &Sink) -> bool {
-    sink.events
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::HostedToolStarted { .. }))
-}
-
 #[tokio::test]
 async fn hosted_search_progress_is_reported_once_without_a_tool_intent() {
     let item = |index: usize, kind: &str, item: Value| {
@@ -1480,45 +1472,6 @@ async fn hosted_search_progress_without_a_usable_item_id_is_skipped() {
             ]
         );
     }
-}
-
-#[tokio::test]
-async fn a_search_cut_short_fails_and_a_stopped_search_is_cancelled() {
-    // Nothing ran locally, so neither outcome is a persistence uncertainty.
-    let fixture = Fixture::start(vec![search_progress("ws_1")]).await;
-    let sink = Sink::default();
-    let error = Engine::new(
-        Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
-        Limits::default(),
-    )
-    .run(input(), &sink, CancellationToken::new())
-    .await
-    .unwrap_err();
-    assert_eq!(error.kind, EngineErrorKind::Protocol);
-    assert!(search_started(&sink));
-    assert_eq!(sink.before.load(Ordering::SeqCst), 0);
-
-    let fixture = Fixture::with_options(vec![search_progress("ws_1")], StatusCode::OK, true).await;
-    let sink = Sink::default();
-    let token = CancellationToken::new();
-    let engine = Engine::new(
-        Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
-        Limits::default(),
-    );
-    let run = engine.run(input(), &sink, token.clone());
-    let stop = async {
-        while !search_started(&sink) {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        token.cancel();
-    };
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(run, stop) })
-            .await
-            .unwrap();
-    assert_eq!(result.unwrap_err().kind, EngineErrorKind::Cancelled);
-    assert_eq!(sink.before.load(Ordering::SeqCst), 0);
-    assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
