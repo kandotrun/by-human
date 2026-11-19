@@ -257,7 +257,6 @@ server/
   tests/                  Rustの契約テストと、そこで使う合成fixture
 web-tests/                Playwrightのブラウザ契約テスト（開発用）
 docs/                     ガイドと、docs/superpowers/ の設計メモ
-core/                     以前のPythonプロトタイプ（サーバーでは使わない）
 by-human-app/             以前のExpoの試作（サーバーでは使わない）
 ```
 
