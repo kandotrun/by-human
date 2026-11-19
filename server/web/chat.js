@@ -11,8 +11,8 @@ const unresolved = (run) => run?.status === "uncertain" && !run.reviewed_at;
 const matchesSubmission = (run, pending) => run.id === pending.runId ||
   (run.idempotency_key === pending.key && run.input_text === pending.text);
 const SIGNED_OUT = "ログインの有効期限が切れたか、ログアウトしました。サーバートークンを入力してください。";
-// Within this distance of the bottom, replies follow new text and the jump
-// button stays hidden.
+// Closer to the bottom than this, replies follow new text and the jump button
+// stays hidden.
 const FOLLOW_DISTANCE = 100;
 
 let signedIn = false;
