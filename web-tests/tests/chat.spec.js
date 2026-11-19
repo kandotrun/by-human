@@ -70,6 +70,10 @@ test('large stored histories open and allow a new message', async ({ page }) => 
   const next = await send(page, 'ここから続けて');
   await expect.poll(async () => (await run(page, next.id)).status).toBe('completed');
   await expect(assistantRows(page).last()).toHaveText('こんにちは。「ここから続けて」を受け取りました。');
+  // Plain and Markdown replies share one reply bubble.
+  const backgrounds = await assistantRows(page).evaluateAll(nodes => nodes.map(node => getComputedStyle(node).backgroundColor));
+  expect(new Set(backgrounds).size).toBe(1);
+  expect(backgrounds[0]).not.toBe('rgba(0, 0, 0, 0)');
 });
 
 test('Japanese send has one transcript row, clears the draft and never stores the token', async ({ page }, testInfo) => {
@@ -949,6 +953,8 @@ test('a status pill and typing dots show what the agent is doing', async ({ page
   const tool = await send(page, '復旧テスト');
   await expect(page.locator('#run-progress')).toHaveText('ツールを実行中');
   await expect(page.locator('#chat-log .typing')).toBeVisible();
+  // The dots sit in the reply bubble.
+  expect(await assistantRows(page).last().evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
   await page.getByRole('button', { name: '停止', exact: true }).click();
   await expect.poll(async () => (await run(page, tool.id)).status).toBe('uncertain');
   await expect(page.locator('#run-progress')).toBeHidden();
