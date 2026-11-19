@@ -9,7 +9,7 @@ Sign in with your ChatGPT plan, keep every conversation in your own PostgreSQL,<
 and chat from a browser or your iPhone.
 
 by-human is a single Rust server that you run yourself.<br>
-It serves its own chat page, uses only the tools you list, and when it can't tell
+It serves its own chat page, uses only its built-in clock and the tools you list, and when it can't tell
 whether a tool finished, it stops and asks you instead of trying again.
 
 <sub>Being built to replace the OpenClaw features its owner uses every day. It stands alone: Pi's design is a reference, and running Pi, OpenClaw or Mukumo is not required.</sub>
@@ -42,7 +42,7 @@ whether a tool finished, it stops and asks you instead of trying again.
   <tr>
     <td align="center"><b>💬 Chat in your browser</b><br>Markdown replies and<br>history grouped by day</td>
     <td align="center"><b>⚡ Watch it work</b><br>Live status, streamed text<br>and Stop</td>
-    <td align="center"><b>🛟 Review the unknown</b><br>Interrupted tool work<br>is never run again</td>
+    <td align="center"><b>🛟 Review the unknown</b><br>Runs with unknown results wait<br>for you and are never replayed</td>
   </tr>
   <tr>
     <td align="center"><img src="docs/images/phone-drawer.webp" width="170" alt="The chat on a phone-sized screen with the conversation drawer open: a 新しい会話 (new conversation) button, a search field, and conversations grouped by day, each with a ⋯ menu."></td>
@@ -63,10 +63,10 @@ whether a tool finished, it stops and asks you instead of trying again.
 ## ✨ Features
 
 - 🔑 **Your ChatGPT plan, no API key** — by-human registers its own OpenAI sign-in and talks to the public Responses API. It never reads the credentials of Codex, OpenClaw or any other app, and never switches to API-key billing on its own. That is an explicit opt-in.
-- 🗄️ **Everything stays in your PostgreSQL** — Conversations, runs, events and tool receipts live in a database you own. Closing the page doesn't stop a run, the event stream picks up where it left off, and resending with the same key never starts a second run.
-- 💬 **A chat page that ships with the server** — Open `http://127.0.0.1:4310/` for streamed Markdown replies, Stop, search, rename and delete, in light or dark. There is no frontend build, no Node.js at runtime, and a browser stays signed in for 30 days after you last use it.
+- 🗄️ **Your history lives in your PostgreSQL** — Conversations, runs, events and tool receipts are stored in a database you own. To write a reply, by-human sends the conversation to OpenAI with `store: false`. Closing the page doesn't stop a run, the event stream picks up where it left off, and resending with the same key never starts a second run.
+- 💬 **A chat page that ships with the server** — Open `http://127.0.0.1:4310/` for streamed Markdown replies, Stop, search, rename and delete, in light or dark. There is no frontend build, no Node.js at runtime, and a browser sign-in ends after about 30 days without use, and lasts 400 days at most.
 - 📱 **On your iPhone, inside your tailnet** — Share the server with Tailscale Serve and add the page to your Home Screen. It opens full screen with its own icon, and the message box stays above the keyboard.
-- 🧰 **Only the tools you list** — Connect MCP servers over stdio or Streamable HTTP, and name each tool you allow. Unlisted tools are never offered to the model, and a tool gets no credentials except the ones you name for it.
+- 🧰 **Only the MCP tools you list** — Besides the built-in clock, the model gets only the MCP tools you name, from servers you connect over stdio or Streamable HTTP. Unlisted tools are never offered to it, and by-human passes each MCP server only the environment variables or bearer token you name for it (a stdio server also inherits `PATH`).
 - 🛟 **Unknown results wait for you** — When Stop, a crash or a timeout leaves a tool's result unknown, the run is marked `uncertain` and is never replayed. You look at what was recorded, leave a note, and then continue the conversation.
 - 🔒 **Secrets stay put** — The ChatGPT sign-in lives in an owner-only `~/.config/by-human` folder, the browser never sees it, and the page never stores the server token.
 
@@ -111,7 +111,7 @@ cargo run -p by-human -- auth-status
 
 Open the printed OpenAI URL in a browser **on the same computer**. The sign-in finishes on a local `127.0.0.1` callback.
 `auth-status` prints only readiness flags, such as `authenticated=true` and `plan_enabled=true`.
-If `plan_enabled` is `false`, run `login --enable-plan` to grant plan access.
+If `plan_enabled` is `false`, run `cargo run -p by-human -- login --enable-plan` to grant plan access.
 
 ### 3. Start the server
 
@@ -136,15 +136,15 @@ The same token also works as a Bearer token for the [HTTP API](docs/http-api.md)
 
 The iPhone needs HTTPS to reach the server. With [Tailscale](https://tailscale.com/) on both devices, and MagicDNS and HTTPS certificates turned on for your tailnet:
 
-1. On the computer running by-human, run `tailscale serve --bg 4310`. It prints an address such as `https://<machine>.<tailnet>.ts.net`.
+1. On the computer running by-human, run `tailscale serve --bg 4310` (on Linux, with `sudo` unless your user is the Tailscale operator). It prints an address such as `https://<machine>.<tailnet>.ts.net`.
 2. Set `BY_HUMAN_PUBLIC_ORIGIN` to exactly that address, with no trailing slash, and restart `serve`.
 3. On the iPhone, open the address in Safari, sign in with the server token, and choose Share → Add to Home Screen.
 
 On the phone, Return adds a new line and the send button sends.
 
 > [!WARNING]
-> Tailscale Serve makes the page reachable by every device and user in your tailnet. The server token still protects your conversations.
-> Never use `tailscale funnel`, which publishes the page to the internet. `tailscale serve reset` removes the Serve setting.
+> Tailscale Serve lets every device and user that your tailnet allows reach the page. The server token still protects your conversations.
+> Never use `tailscale funnel`, which publishes the page to the internet.
 
 ## 🧰 Connect MCP tools
 
@@ -176,6 +176,8 @@ cargo run -p by-human -- mcp list
 `mcp list` connects, prints the enabled tools as JSON, and disconnects. It calls no tool and needs neither the database nor a ChatGPT sign-in.
 `serve` reads the same file at startup, so restart it after a change.
 A stdio server runs as your own user and is not sandboxed, so choose programs you trust.
+It inherits `PATH` if by-human has one, and receives no other variables except those named in `env` (here `NOTES_TOKEN`).
+Each variable named in `env` must be set where by-human runs, or startup fails.
 HTTP servers use HTTPS (or loopback HTTP) and only the bearer token named in `bearer_token_env`.
 Details: [MCP tools](docs/mcp.md).
 
@@ -249,7 +251,7 @@ Run each one as `cargo run -p by-human -- <command>`.
 
 **Known limits:**
 
-- A conversation shows its latest 100 runs. Older runs stay stored, but there is no paging yet.
+- A conversation shows up to its latest 100 runs that fit in an 8 MiB snapshot. Older runs stay stored, but there is no paging yet.
 - Context is capped at 256 turns or 2 MiB, with no compaction yet; past that, a run fails with `CONTEXT_LIMIT_REACHED`.
 - One server per database. A second `serve` on the same database is refused.
 - The server has no TLS, CORS or device pairing of its own. Keep it on loopback, or reach it through Tailscale Serve.
@@ -290,7 +292,7 @@ cargo test --locked --workspace --all-features
 Tests never connect to an existing OpenClaw, Every or Mukumo service.
 
 The browser contracts run the same Rust API and runner with a synthetic model and an isolated generated schema.
-Node.js is needed only for them:
+Node.js is needed only for them (CI uses Node.js 24):
 
 ```sh
 cd web-tests
@@ -299,6 +301,7 @@ npx playwright install chromium
 npm test
 ```
 
+On Linux, `npx playwright install --with-deps chromium` also installs the system libraries Chromium needs.
 Keep the isolated `DATABASE_URL` exported. The browser fixture binds loopback port 43219 and is not part of a normal build.
 
 ## 📚 Docs
