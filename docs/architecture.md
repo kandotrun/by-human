@@ -30,8 +30,10 @@ leaves an unknown tool outcome. Stop during a search ends the run as cancelled,
 and a lost stream ends it as failed. As during any model request, a server
 crash, the 120-second run deadline or a storage failure still leaves the
 running run uncertain. Its `web_search_call` items stay in the canonical
-output. While search is on they are replayed in later requests, as stateless
-Responses requests require. While it is off, requests leave them out:
+output, except a malformed item without a usable ID, which is left out because
+it is not valid Responses input. While search is on they are replayed in later
+requests, as stateless Responses requests require. While it is off, requests
+leave them out:
 a request that replays a search without offering the tool can fail, which would
 stop a conversation that searched before. The model cites sources as Markdown
 links in its text, so `url_citation` annotations need no separate storage.
