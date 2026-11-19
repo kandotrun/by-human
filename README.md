@@ -276,7 +276,6 @@ server/
   tests/                  Rust contracts and their synthetic fixtures
 web-tests/                Playwright browser contracts (development only)
 docs/                     Guides, and design notes in docs/superpowers/
-core/                     Earlier Python prototype (not used by the server)
 by-human-app/             Earlier Expo experiment (not used by the server)
 ```
 
