@@ -290,6 +290,7 @@ Linuxでは`npx playwright install --with-deps chromium`にすると、Chromium�
 | [http-api.md](docs/http-api.md) | ルート、ブラウザセッション、イベントの再取得、停止と確認 |
 | [web-chat.md](docs/web-chat.md) | チャット画面、iPhoneの設定、結果不明の実行の確認 |
 | [mcp.md](docs/mcp.md) | MCPの設定、結果、停止と復旧 |
+| [deploy.md](docs/deploy.md) | 常時起動のLinuxホストでDocker Composeを使って動かす方法と`just deploy` |
 | [設計メモ](docs/superpowers/specs/2026-11-18-daily-driver-web-chat-design.md) | ブラウザチャットの設計。実装計画は[docs/superpowers/plans](docs/superpowers/plans)にあります |
 
 ## 📄 ライセンスとクレジット

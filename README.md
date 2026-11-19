@@ -312,6 +312,7 @@ Keep the isolated `DATABASE_URL` exported. The browser fixture binds loopback po
 | [http-api.md](docs/http-api.md) | Routes, browser sessions, event replay, Stop and review |
 | [web-chat.md](docs/web-chat.md) | The chat page, iPhone setup, and reviewing uncertain runs |
 | [mcp.md](docs/mcp.md) | MCP configuration, results, Stop and recovery |
+| [deploy.md](docs/deploy.md) | Running on an always-on Linux host with Docker Compose, and `just deploy` |
 | [Design notes](docs/superpowers/specs/2026-11-18-daily-driver-web-chat-design.md) | The browser chat design; implementation plans are in [docs/superpowers/plans](docs/superpowers/plans) |
 
 ## 📄 License and credits
