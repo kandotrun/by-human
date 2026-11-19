@@ -4,7 +4,7 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, RawQuery, State},
     http::{
         HeaderMap, Method, StatusCode,
         header::{self, AUTHORIZATION},
@@ -74,6 +74,7 @@ pub fn router(state: ApiState) -> Router {
             "/conversations",
             get(list_conversations).post(create_conversation),
         )
+        .route("/conversations/search", get(search_conversations))
         .route(
             "/conversations/{id}",
             get(get_conversation)
@@ -267,8 +268,34 @@ async fn create_conversation(
 }
 
 async fn list_conversations(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
+    let mut conversations = state.store.list_conversations(101).await?;
+    let has_more = conversations.len() > 100;
+    conversations.truncate(100);
     Ok(Json(
-        json!({"conversations": state.store.list_conversations(100).await?}),
+        json!({"conversations": conversations, "has_more": has_more}),
+    ))
+}
+
+/// `?q=` with exactly one value; any other parameter is rejected.
+async fn search_conversations(
+    State(state): State<ApiState>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<Value>, ApiError> {
+    let invalid = || ApiError::bad_request("invalid_input");
+    let raw = raw.filter(|raw| raw.len() <= 4096).ok_or_else(invalid)?;
+    let parsed = reqwest::Url::parse(&format!("http://localhost/?{raw}")).map_err(|_| invalid())?;
+    let mut query = None;
+    for (key, value) in parsed.query_pairs() {
+        if key != "q" || query.is_some() {
+            return Err(invalid());
+        }
+        query = Some(value.into_owned());
+    }
+    let query = query.ok_or_else(invalid)?;
+    nonempty(&query, 400)?;
+    let (conversations, truncated) = state.store.search_conversations(&query, 50).await?;
+    Ok(Json(
+        json!({"conversations": conversations, "truncated": truncated}),
     ))
 }
 

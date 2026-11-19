@@ -50,6 +50,12 @@ browser disappears when it is next opened or its reply stream reconnects, and a
 message sent to it is marked as not accepted so its text can be returned to the
 composer.
 
+The search field above the list finds conversations by title, your messages
+and reply text. It waits for Japanese input to finish converting, shows a short
+excerpt of the newest matching message as plain text, and Escape clears it. The
+list shows the 100 most recently active conversations and says when older ones
+exist; search reaches those too.
+
 The browser loads the latest 100 runs that fit in an 8 MiB response. It marks
 omitted history at the top of the conversation. Older runs remain stored on the
 server. Paging remains outside this slice.
@@ -106,6 +112,8 @@ not an independent verification of external effects or a per-tool approval syste
 まとめて表示します。各会話の「⋯」から名前の変更と削除ができます。
 削除は確認のあとに会話・実行記録・確認メモを完全に消し、元に戻せません。
 実行中の処理や確認待ちの結果がある会話は削除できません。
+一覧の上の検索欄では、タイトル・自分のメッセージ・返信の本文から会話を探せます。
+日本語の変換が確定してから検索し、一致した部分の前後を文字のまま表示します。
 
 下書きと送信結果の確認待ちは、このタブのsessionStorageに保存します。
 送信結果が不明なときは、同じ送信IDで確認し、新しいIDで送り直しません。

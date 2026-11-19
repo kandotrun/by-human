@@ -1424,3 +1424,249 @@ async fn delete_rechecks_blocking_work_after_waiting_for_the_lock() {
     assert_eq!(listed_ids(&f.store).await, [conversation.id]);
     f.cleanup().await;
 }
+
+async fn finished_run(
+    store: &Store,
+    conversation: Uuid,
+    key: &str,
+    input: &str,
+    output: &str,
+) -> Uuid {
+    let owner = store.acquire_owner().await.unwrap();
+    let run = store.enqueue(conversation, key, input).await.unwrap().run;
+    store.claim_next(owner.owner_id()).await.unwrap().unwrap();
+    store
+        .finish(run.id, owner.owner_id(), completed(vec![], output))
+        .await
+        .unwrap();
+    owner.release().await.unwrap();
+    run.id
+}
+
+async fn search(store: &Store, query: &str) -> Vec<(String, Option<(Uuid, &'static str, String)>)> {
+    let (results, truncated) = store.search_conversations(query, 50).await.unwrap();
+    assert!(!truncated);
+    results
+        .into_iter()
+        .map(|result| {
+            (
+                result.conversation.title,
+                result
+                    .matched
+                    .map(|matched| (matched.run_id, matched.role, matched.snippet)),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn search_matches_titles_and_message_text_case_insensitively() {
+    let f = Fixture::new().await;
+    f.store.create_conversation("旅行の計画").await.unwrap();
+    let rust = f.store.create_conversation("Rust").await.unwrap();
+    let run = finished_run(
+        &f.store,
+        rust.id,
+        "ownership",
+        "所有権について教えて",
+        "Ownership MOVES values.",
+    )
+    .await;
+    assert_eq!(
+        search(&f.store, " 計画 ").await,
+        [("旅行の計画".to_owned(), None)]
+    );
+    assert_eq!(
+        search(&f.store, "所有権").await,
+        [(
+            "Rust".to_owned(),
+            Some((run, "user", "所有権について教えて".to_owned()))
+        )]
+    );
+    assert_eq!(
+        search(&f.store, "moves VALUES").await,
+        [(
+            "Rust".to_owned(),
+            Some((run, "assistant", "Ownership MOVES values.".to_owned()))
+        )]
+    );
+    assert!(search(&f.store, "存在しない").await.is_empty());
+
+    // LIKE wildcards and backslashes are ordinary characters.
+    for title in [
+        "100% done",
+        "1000 done",
+        "snake_case",
+        "snakeXcase",
+        r"back\slash",
+        "backslash",
+    ] {
+        f.store.create_conversation(title).await.unwrap();
+    }
+    for (query, title) in [
+        ("100%", "100% done"),
+        ("e_c", "snake_case"),
+        (r"\", r"back\slash"),
+    ] {
+        assert_eq!(search(&f.store, query).await, [(title.to_owned(), None)]);
+    }
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn search_snippets_are_short_and_come_from_the_newest_match() {
+    let f = Fixture::new().await;
+    let conversation = f.store.create_conversation("長い返信").await.unwrap();
+    finished_run(&f.store, conversation.id, "old", "古い依頼", "目印 old").await;
+    let long = format!("{}目印{}", "あ".repeat(300), "い".repeat(400));
+    let newest = finished_run(&f.store, conversation.id, "new", "新しい依頼", &long).await;
+    let found = search(&f.store, "目印").await;
+    let (run, role, snippet) = found[0].1.clone().unwrap();
+    assert_eq!((run, role), (newest, "assistant"));
+    // The excerpt starts 10 characters before the match.
+    assert_eq!(
+        snippet,
+        format!("…{}目印{}…", "あ".repeat(10), "い".repeat(109))
+    );
+    // At most 121 characters of text plus an ellipsis at each cut end.
+    assert!(snippet.chars().count() <= 121 + 2);
+
+    // A 100-character match is shown whole.
+    let query = "う".repeat(100);
+    let wide = f.store.create_conversation("長い検索語").await.unwrap();
+    let text = format!("{}{query}{}", "あ".repeat(300), "い".repeat(300));
+    let wide_run = finished_run(&f.store, wide.id, "wide", "長い語を探す", &text).await;
+    assert_eq!(
+        search(&f.store, &query).await,
+        [(
+            "長い検索語".to_owned(),
+            Some((
+                wide_run,
+                "assistant",
+                format!("…{}{query}{}…", "あ".repeat(10), "い".repeat(11))
+            ))
+        )]
+    );
+
+    let spaced = f.store.create_conversation("改行").await.unwrap();
+    finished_run(
+        &f.store,
+        spaced.id,
+        "spaced",
+        "前の行\n\n目じるし\tあと\u{0007}",
+        "",
+    )
+    .await;
+    assert_eq!(
+        search(&f.store, "目じるし").await[0].1.as_ref().unwrap().2,
+        "前の行 目じるし あと"
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn search_takes_the_snippet_from_the_reply_when_both_messages_match() {
+    let f = Fixture::new().await;
+    let conversation = f.store.create_conversation("両方").await.unwrap();
+    let run = finished_run(
+        &f.store,
+        conversation.id,
+        "both",
+        "目印を探して",
+        "目印はここです",
+    )
+    .await;
+    assert_eq!(
+        search(&f.store, "目印").await,
+        [(
+            "両方".to_owned(),
+            Some((run, "assistant", "目印はここです".to_owned()))
+        )]
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn search_ignores_tool_records_reasoning_and_review_notes() {
+    let f = Fixture::new().await;
+    let owner = f.store.acquire_owner().await.unwrap();
+    let owner_id = owner.owner_id();
+    let conversation = f.store.create_conversation("記録").await.unwrap();
+    let run = f
+        .store
+        .enqueue(conversation.id, "tool", "道具を使う")
+        .await
+        .unwrap()
+        .run;
+    f.store.claim_next(owner_id).await.unwrap().unwrap();
+    f.store
+        .before_tool(
+            run.id,
+            owner_id,
+            "call",
+            "external_write",
+            json!({"note": "秘密の引数"}),
+        )
+        .await
+        .unwrap();
+    let uncertain = f
+        .store
+        .finish(
+            run.id,
+            owner_id,
+            completed(
+                vec![json!({"type": "reasoning", "summary": "推論だけの語"})],
+                "返信",
+            ),
+        )
+        .await
+        .unwrap();
+    f.store
+        .resolve_uncertain(run.id, uncertain.event_seq, "確認メモだけの語")
+        .await
+        .unwrap();
+    for hidden in [
+        "秘密の引数",
+        "推論だけの語",
+        "確認メモだけの語",
+        "external_write",
+    ] {
+        assert!(search(&f.store, hidden).await.is_empty(), "{hidden}");
+    }
+    assert_eq!(search(&f.store, "道具").await.len(), 1);
+    owner.release().await.unwrap();
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn search_validates_queries_and_reports_truncation_in_list_order() {
+    let f = Fixture::new().await;
+    let too_long = "あ".repeat(101);
+    for invalid in ["", "  ", too_long.as_str(), "a\0b"] {
+        assert!(matches!(
+            f.store.search_conversations(invalid, 50).await,
+            Err(StoreError::InvalidInput(_))
+        ));
+    }
+    assert!(
+        f.store
+            .search_conversations(&"あ".repeat(100), 50)
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    let first = f.store.create_conversation("同じ語 1").await.unwrap();
+    let second = f.store.create_conversation("同じ語 2").await.unwrap();
+    let third = f.store.create_conversation("同じ語 3").await.unwrap();
+    f.store.enqueue(first.id, "first", "動かす").await.unwrap();
+    let (results, truncated) = f.store.search_conversations("同じ語", 2).await.unwrap();
+    assert!(truncated);
+    let ids: Vec<_> = results
+        .iter()
+        .map(|result| result.conversation.id)
+        .collect();
+    assert_eq!(ids, [first.id, third.id]);
+    assert_ne!(ids[1], second.id);
+    f.cleanup().await;
+}

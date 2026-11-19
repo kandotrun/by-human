@@ -15,7 +15,8 @@ endpoint or device pairing UI.
 | GET | `/v1/session` | Current credentials: `method` is `browser` or `bearer`, with the session's `expires_at` |
 | DELETE | `/v1/session` | End the current browser session |
 | POST | `/v1/conversations` | Create with `{}` for an automatic title or `{"title":"..."}` for an explicit title |
-| GET | `/v1/conversations` | 100 conversations with the latest activity |
+| GET | `/v1/conversations` | 100 conversations with the latest activity, and `has_more` |
+| GET | `/v1/conversations/search?q=...` | Conversations whose title or messages contain the text |
 | GET | `/v1/conversations/{id}` | Conversation, latest chat messages and public run states |
 | PATCH | `/v1/conversations/{id}` | Rename with `{"title":"..."}` |
 | DELETE | `/v1/conversations/{id}` | Permanently delete the conversation and its records |
@@ -41,6 +42,22 @@ supplied titles retain their names.
 Conversations carry `last_activity_at`: the creation time, raised to each newly
 accepted run's `created_at`. Exact retries, Stop, finished replies, renames and
 reviews do not change it. The list is ordered by it, newest first.
+
+The list adds `has_more: true` when older conversations exist beyond those 100.
+Search finds them.
+
+`GET /v1/conversations/search` takes exactly one `q` (1 to 100 characters
+after trimming, at most 400 bytes, no NUL); any other parameter returns `400`.
+It matches titles, your messages and reply text as a case-insensitive
+substring, so one- or two-character Japanese queries work and `%`, `_` and `\`
+are ordinary characters. Tool arguments and results, reasoning, events and
+review notes are never searched. The response lists up to 50 conversations in
+list order as `{"conversations":[...],"truncated":bool}`. Each item has the
+conversation fields and `match`: `null` for a title-only match, otherwise the
+newest matching message as `{"run_id","role":"user"|"assistant","snippet"}`.
+The snippet is plain text of at most 121 characters around the match, with
+whitespace collapsed and `…` where it was cut. A reply is searchable once its
+run settles. A search that exceeds 3 seconds returns `503`.
 
 `PATCH` takes exactly `{"title":"..."}` (1 to 200 characters after trimming)
 and returns `200` with the conversation, `400` for an invalid title, `404` for
@@ -135,6 +152,7 @@ uncertain. This does not claim exactly-once execution of arbitrary external work
 同じキーで本文を変更すると`409`になります。
 SSEの接続を閉じても実行は止まりません。停止には`/cancel`を使います。
 会話は`PATCH`で名前を変更でき、`DELETE`で完全に削除できます。
+`/v1/conversations/search?q=`はタイトルとメッセージ本文を部分一致で検索します。
 実行中または確認待ちの処理がある会話の削除は`409`になります。
 
 再起動時、処理中だった実行は結果未確認の`uncertain`として残し、自動再実行しません。

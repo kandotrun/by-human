@@ -1653,3 +1653,304 @@ test('a conversation created before an accepted send is listed below it', async 
     release();
   }
 });
+
+const searchBox = page => page.getByRole('searchbox', { name: '会話を検索', exact: true });
+
+test('search finds conversations by title and message text', async ({ page }) => {
+  await connect(page);
+  const suffix = Date.now().toString(36);
+  const titled = await createTitled(page, `検索タイトル${suffix}`);
+  const id = await newConversation(page);
+  const sent = await send(page, `本文の目印${suffix}`);
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  const listed = page.locator('#conversation-list [data-conversation-id]');
+  await searchBox(page).fill(`目印${suffix}`);
+  await expect(listed).toHaveCount(1);
+  await expect(conversationButton(page, id)).toBeVisible();
+  // Both messages match; the reply is the newer one.
+  await expect(page.locator('#conversation-list .conversation-snippet')).toHaveText(`こんにちは。「本文の目印${suffix}」を受け取りました。`);
+  await searchBox(page).fill(`検索タイトル${suffix}`);
+  await expect(listed).toHaveCount(1);
+  await expect(conversationButton(page, titled)).toBeVisible();
+  await expect(page.locator('#conversation-list .conversation-snippet')).toHaveCount(0);
+  await conversationButton(page, titled).click();
+  await expect(conversationTitle(page)).toHaveText(`検索タイトル${suffix}`);
+  await expect(searchBox(page)).toHaveValue(`検索タイトル${suffix}`);
+  await searchBox(page).fill(`該当なし${suffix}`);
+  await expect(page.locator('#conversation-list')).toHaveText(`「該当なし${suffix}」に一致する会話はありません`);
+  await searchBox(page).press('Escape');
+  await expect(searchBox(page)).toHaveValue('');
+  await expect(conversationButton(page, id)).toBeVisible();
+  await expect(page.locator('#conversation-list h2').first()).toHaveText('今日');
+});
+
+test('search waits for Japanese input to finish', async ({ page }) => {
+  await connect(page);
+  const requests = [];
+  page.on('request', request => { if (request.url().includes('/v1/conversations/search')) requests.push(request.url()); });
+  await searchBox(page).focus();
+  await searchBox(page).dispatchEvent('compositionstart');
+  await searchBox(page).fill('にほんご');
+  await page.waitForTimeout(600);
+  expect(requests).toHaveLength(0);
+  await searchBox(page).dispatchEvent('compositionend');
+  await expect.poll(() => requests.length).toBe(1);
+  await page.waitForTimeout(500);
+  expect(requests).toHaveLength(1);
+  expect(new URL(requests[0]).searchParams.get('q')).toBe('にほんご');
+});
+
+test('search snippets show reply text as plain text', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const marker = `検索XSS${Date.now().toString(36)}`;
+  const sent = await send(page, `${marker}<img src=x onerror="window.injected=1">`);
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  await searchBox(page).fill(marker);
+  await expect(page.locator('#conversation-list .conversation-snippet')).toContainText(`${marker}<img src=x onerror="window.injected=1">`);
+  await expect(page.locator('#conversation-list img')).toHaveCount(0);
+  expect(await page.evaluate(() => window.injected)).toBeUndefined();
+});
+
+test('a search snippet begins near the match so its two lines show it', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const marker = `見える目印${Date.now().toString(36)}`;
+  const sent = await send(page, `${'長い前置きの文章です。'.repeat(6)}${marker}`);
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  await searchBox(page).fill(marker);
+  const snippet = page.locator('#conversation-list .conversation-snippet');
+  await expect(snippet).toContainText(marker);
+  // The snippet is clamped to two lines; the match must start on the first.
+  const line = await snippet.evaluate((node, text) => {
+    const range = document.createRange();
+    const start = node.textContent.indexOf(text);
+    range.setStart(node.firstChild, start);
+    range.setEnd(node.firstChild, start + 1);
+    const top = range.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    return Math.floor(top / parseFloat(getComputedStyle(node).lineHeight));
+  }, marker);
+  expect(line).toBe(0);
+});
+
+test('the list says when older conversations exist', async ({ page }) => {
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...(await response.json()), has_more: true } });
+  });
+  await connect(page);
+  await expect(page.locator('#conversation-list .sidebar-more')).toHaveText('これより古い会話は検索で探せます。');
+});
+
+const searchRequests = url => url.pathname === '/v1/conversations/search';
+
+test('renaming or deleting during a search refreshes its results', async ({ page }) => {
+  const suffix = Date.now().toString(36);
+  const query = `書き換え${suffix}`;
+  const renamed = await createTitled(page, `${query}の前`);
+  const kept = await createTitled(page, `${query}を残す`);
+  const removed = await createTitled(page, `${query}を削除`);
+  await connect(page);
+  // The next search answer is fetched at once and delivered when released.
+  const releases = [];
+  let gate = null;
+  let held = 0;
+  await page.route(searchRequests, async route => {
+    const wait = gate;
+    gate = null;
+    if (!wait) return route.continue();
+    const response = await route.fetch();
+    held += 1;
+    await wait;
+    await route.fulfill({ response });
+  });
+  const holdNextSearch = () => {
+    const { promise, resolve } = Promise.withResolvers();
+    gate = promise;
+    releases.push(resolve);
+    return resolve;
+  };
+  const rows = page.locator('#conversation-list [data-conversation-id]');
+  try {
+    const releaseBeforeRename = holdNextSearch();
+    await searchBox(page).fill(query);
+    await expect.poll(() => held).toBe(1);
+    await openMenu(page, renamed, '名前を変更');
+    await renameDialog(page).getByLabel('名前', { exact: true }).fill(`改名後${suffix}`);
+    await page.keyboard.press('Enter');
+    await expect(renameDialog(page)).toBeHidden();
+    releaseBeforeRename();
+    // Neither the old title nor the new one, which no longer matches, stays.
+    await expect(rows).toHaveCount(2);
+    await expect(conversationButton(page, renamed)).toHaveCount(0);
+
+    await searchBox(page).press('Escape');
+    const releaseBeforeDelete = holdNextSearch();
+    await searchBox(page).fill(query);
+    await expect.poll(() => held).toBe(2);
+    await openMenu(page, removed, '削除');
+    await deleteDialog(page).getByRole('button', { name: '削除', exact: true }).click();
+    await expect(deleteDialog(page)).toBeHidden();
+    releaseBeforeDelete();
+    // The deleted row does not come back.
+    await expect(rows).toHaveCount(1);
+    await expect(conversationButton(page, kept)).toBeVisible();
+  } finally {
+    for (const release of releases) release();
+  }
+});
+
+test('renaming a search result by keyboard so it no longer matches moves focus to the search field', async ({ page }) => {
+  const suffix = Date.now().toString(36);
+  const id = await createTitled(page, `外れる名前${suffix}`);
+  await connect(page);
+  await searchBox(page).fill(`外れる名前${suffix}`);
+  await expect(page.locator('#conversation-list [data-conversation-id]')).toHaveCount(1);
+  await menuButton(page, id).focus();
+  await page.keyboard.press('Enter');
+  await expect(conversationMenu(page).getByRole('button', { name: '名前を変更', exact: true })).toBeFocused();
+  await page.keyboard.press('Enter');
+  const input = renameDialog(page).getByLabel('名前', { exact: true });
+  await expect(input).toBeFocused();
+  await input.fill(`別の名前${suffix}`);
+  await page.keyboard.press('Enter');
+  await expect(renameDialog(page)).toBeHidden();
+  // The refreshed results drop the row whose menu button had focus.
+  await expect(conversationButton(page, id)).toHaveCount(0);
+  await expect(searchBox(page)).toBeFocused();
+});
+
+test('a changed query ignores the answer for the previous one', async ({ page }) => {
+  const suffix = Date.now().toString(36);
+  const before = await createTitled(page, `前の語${suffix}`);
+  const after = await createTitled(page, `次の語${suffix}`);
+  await connect(page);
+  const releases = [];
+  await page.route(searchRequests, async route => {
+    const response = await route.fetch();
+    const { promise, resolve } = Promise.withResolvers();
+    releases.push(resolve);
+    await promise;
+    await route.fulfill({ response });
+  });
+  try {
+    // The previous answer arrives while Japanese input is converting.
+    await searchBox(page).fill(`前の語${suffix}`);
+    await expect.poll(() => releases.length).toBe(1);
+    await searchBox(page).dispatchEvent('compositionstart');
+    await searchBox(page).fill(`次の語${suffix}`);
+    releases[0]();
+    await searchBox(page).dispatchEvent('compositionend');
+    await expect.poll(() => releases.length).toBe(2);
+    await expect(conversationButton(page, after)).toBeVisible();
+    releases[1]();
+    await expect(conversationButton(page, before)).toHaveCount(0);
+
+    // The previous answer arrives during the pause after typing.
+    await searchBox(page).fill(`前の語${suffix}`);
+    await expect.poll(() => releases.length).toBe(3);
+    await searchBox(page).fill(`次の語${suffix}`);
+    releases[2]();
+    await expect.poll(() => releases.length).toBe(4);
+    await expect(conversationButton(page, after)).toBeVisible();
+    await expect(conversationButton(page, before)).toHaveCount(0);
+    releases[3]();
+    await expect(conversationButton(page, after)).toBeVisible();
+  } finally {
+    for (const release of releases) release();
+  }
+});
+
+test('creating a conversation ends a search that has not answered yet', async ({ page }) => {
+  await connect(page);
+  const { promise: hold, resolve: release } = Promise.withResolvers();
+  let held = false;
+  await page.route(searchRequests, async route => {
+    held = true;
+    const response = await route.fetch();
+    await hold;
+    await route.fulfill({ response });
+  });
+  try {
+    await searchBox(page).fill(`該当なし${Date.now().toString(36)}`);
+    await expect.poll(() => held).toBe(true);
+    const created = await newConversation(page);
+    await expect(searchBox(page)).toHaveValue('');
+    release();
+    await expect(conversationButton(page, created)).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('#conversation-list .sidebar-empty')).toHaveCount(0);
+  } finally {
+    release();
+  }
+});
+
+test('Escape during Japanese conversion in the search field keeps the drawer open', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await connect(page);
+  await page.getByRole('button', { name: '会話一覧を開く', exact: true }).click();
+  const list = page.getByRole('navigation', { name: '会話一覧', exact: true });
+  await expect(list).toBeVisible();
+  await searchBox(page).fill('にほんご');
+  await searchBox(page).dispatchEvent('compositionstart');
+  // Escape's own keyCode, so only isComposing marks it as part of conversion.
+  await searchBox(page).dispatchEvent('keydown', { key: 'Escape', code: 'Escape', isComposing: true, keyCode: 27 });
+  await expect(list).toBeVisible();
+  await expect(searchBox(page)).toHaveValue('にほんご');
+  await searchBox(page).dispatchEvent('compositionend');
+  // Safari ends composition first, so the key that ends it arrives as 229.
+  await searchBox(page).dispatchEvent('keydown', { key: 'Escape', code: 'Escape', isComposing: false, keyCode: 229 });
+  await expect(list).toBeVisible();
+  await expect(searchBox(page)).toHaveValue('にほんご');
+});
+
+test('a conversation found only by search joins the list when it gets a new message', async ({ page }) => {
+  const suffix = Date.now().toString(36);
+  const title = `一覧の外${suffix}`;
+  const id = await createTitled(page, title);
+  // The list leaves it out, as if it were older than the newest 100.
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    const body = await response.json();
+    body.conversations = body.conversations.filter(item => item.id !== id);
+    await route.fulfill({ response, json: body });
+  });
+  await connect(page);
+  await expect(conversationButton(page, id)).toHaveCount(0);
+  await searchBox(page).fill(title);
+  await conversationButton(page, id).click();
+  await expect(composer(page)).toBeEnabled();
+  await send(page, '新しいメッセージ');
+  await searchBox(page).press('Escape');
+  await expect(firstListed(page)).toHaveAttribute('data-conversation-id', id);
+});
+
+test('a late search answer cannot bring back a conversation deleted elsewhere', async ({ page }) => {
+  const suffix = Date.now().toString(36);
+  const title = `遅い検索${suffix}`;
+  const id = await createTitled(page, title);
+  await connect(page);
+  const { promise: hold, resolve: release } = Promise.withResolvers();
+  const { promise: answered, resolve: markAnswered } = Promise.withResolvers();
+  await page.route(url => searchRequests(url), async route => {
+    const response = await route.fetch();
+    markAnswered();
+    await hold;
+    await route.fulfill({ response });
+  });
+  try {
+    await searchBox(page).fill(title);
+    // The server found it before the delete; the page has not seen the answer yet.
+    await answered;
+    expect((await page.request.delete(`/v1/conversations/${id}`, { headers: auth })).status()).toBe(204);
+    // Opening it from the list finds it gone, while the search answer is still on its way.
+    await conversationButton(page, id).click();
+    await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
+    release();
+    await expect(page.locator('#conversation-list')).toContainText(`「${title}」に一致する会話はありません`);
+    await expect(conversationButton(page, id)).toHaveCount(0);
+  } finally {
+    release();
+  }
+});

@@ -55,6 +55,15 @@ let deleting = false;
 // The server's last refusal, shown while this tab sees no blocking work.
 let deleteError = "";
 let focusAfterDelete = "";
+let hasMore = false;
+// Search results replace the list while the search field has text.
+let searchQuery = "";
+let searchResults = null;
+let searchFailed = false;
+let searchTruncated = false;
+let searchRequest = 0;
+let searchTimer = 0;
+let searchComposing = false;
 const drafts = new Map();
 const outbox = new Map();
 const sending = new Map();
@@ -201,16 +210,19 @@ function renderSidebar() {
   $("connection-state").textContent = signedIn ? "ログイン中" : "未ログイン";
   $("connection-state").classList.toggle("connected", signedIn);
   const list = $("conversation-list");
-  // Rows are rebuilt, so keyboard focus moves to the same row's new control.
+  // Rows are rebuilt, so keyboard focus moves to the same row's new control,
+  // or to the search field when the row has left the search results.
   const focused = list.contains(document.activeElement) ? document.activeElement : null;
   const focusSelector = focused?.dataset.conversationId ? `[data-conversation-id="${focused.dataset.conversationId}"]`
     : focused?.dataset.menuFor ? `[data-menu-for="${focused.dataset.menuFor}"]` : "";
   const menuOpen = $("conversation-menu").matches(":popover-open");
+  $("conversation-query").disabled = !signedIn || !listed;
   list.replaceChildren();
+  const searching = searchResults !== null;
   const now = new Date();
   let group = null;
   let label = "";
-  for (const conversation of conversations) {
+  for (const conversation of searching ? searchResults : conversations) {
     const next = activityGroup(conversation.last_activity_at, now);
     if (!group || next !== label) {
       label = next;
@@ -221,9 +233,18 @@ function renderSidebar() {
       list.append(heading, group);
     }
     const item = element("li", "conversation-item");
-    const select = element("button", "conversation-select", conversation.title);
+    const select = element("button", "conversation-select");
     select.type = "button";
     select.dataset.conversationId = conversation.id;
+    select.append(element("span", "conversation-title", conversation.title));
+    if (searching && typeof conversation.match?.snippet === "string") {
+      // Matched message text is shown as text only, never as Markdown or HTML.
+      const snippet = element("span", "conversation-snippet", conversation.match.snippet);
+      snippet.id = `snippet-${conversation.id}`;
+      select.setAttribute("aria-label", conversation.title);
+      select.setAttribute("aria-describedby", snippet.id);
+      select.append(snippet);
+    }
     if (conversation.id === selectedId) {
       select.setAttribute("aria-current", "page");
       item.classList.add("current");
@@ -239,8 +260,18 @@ function renderSidebar() {
     item.append(select, more);
     group.append(item);
   }
-  if (signedIn && !conversations.length) list.append(element("p", "sidebar-empty", "会話はまだありません"));
-  if (focusSelector) list.querySelector(focusSelector)?.focus();
+  if (searching && searchFailed) {
+    const failed = element("p", "sidebar-more", "検索できませんでした。");
+    const retry = element("button", "text-button", "もう一度検索");
+    retry.type = "button";
+    retry.addEventListener("click", runSearch);
+    failed.append(retry);
+    list.append(failed);
+  } else if (searching && !searchResults.length) list.append(element("p", "sidebar-empty", `「${searchQuery}」に一致する会話はありません`));
+  else if (!searching && signedIn && !conversations.length) list.append(element("p", "sidebar-empty", "会話はまだありません"));
+  if (searching && searchTruncated) list.append(element("p", "sidebar-more", "新しい順に50件まで表示しています。語句を足すと絞り込めます。"));
+  if (!searching && hasMore) list.append(element("p", "sidebar-more", "これより古い会話は検索で探せます。"));
+  if (focusSelector) (list.querySelector(focusSelector) ?? (searching ? $("conversation-query") : null))?.focus();
 }
 
 // Local calendar days: today, yesterday, the 7 days before, then months.
@@ -252,6 +283,51 @@ function activityGroup(at, now) {
   if (time >= midnight(7)) return "過去 7 日間";
   const month = `${time.getMonth() + 1}月`;
   return time.getFullYear() === now.getFullYear() ? month : `${time.getFullYear()}年${month}`;
+}
+
+// A row can come from the list or from search results.
+const known = (id) => conversations.find((item) => item.id === id) ?? searchResults?.find((item) => item.id === id);
+
+function scheduleSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSearch, 250);
+}
+
+async function runSearch() {
+  clearTimeout(searchTimer);
+  const query = $("conversation-query").value.trim();
+  const request = ++searchRequest;
+  if (!query) {
+    clearSearch(false);
+    return;
+  }
+  const capturedConnection = connection;
+  try {
+    const result = await api(`/conversations/search?q=${encodeURIComponent(query)}`);
+    if (request !== searchRequest || capturedConnection !== connection) return;
+    // An answer can predate a deletion this tab has already confirmed.
+    searchResults = result.conversations.filter((item) => UUID.test(item.id) && !forgotten.has(item.id));
+    searchTruncated = Boolean(result.truncated);
+    searchFailed = false;
+  } catch (error) {
+    if (request !== searchRequest || capturedConnection !== connection || error.name === "AbortError") return;
+    searchResults = [];
+    searchTruncated = false;
+    searchFailed = true;
+  }
+  searchQuery = query;
+  renderSidebar();
+}
+
+function clearSearch(clearField = true) {
+  clearTimeout(searchTimer);
+  searchRequest += 1;
+  if (clearField) $("conversation-query").value = "";
+  searchQuery = "";
+  searchResults = null;
+  searchFailed = false;
+  searchTruncated = false;
+  renderSidebar();
 }
 
 const menuButton = (id) => document.querySelector(`#conversation-list [data-menu-for="${id}"]`);
@@ -292,7 +368,7 @@ function closeMenu() {
 }
 
 function openRename(id) {
-  const conversation = conversations.find((item) => item.id === id);
+  const conversation = known(id);
   if (!conversation) return;
   renameTarget = id;
   // rename() compares with the opening name; the title can change meanwhile.
@@ -307,7 +383,7 @@ async function rename(event) {
   event.preventDefault();
   if (renaming) return;
   const id = renameTarget;
-  const conversation = conversations.find((item) => item.id === id);
+  const conversation = known(id);
   const title = $("rename-input").value.trim();
   if (!conversation) return $("rename-dialog").close();
   if (!title) {
@@ -335,6 +411,9 @@ async function rename(event) {
     if (selectedId === id && loading) refreshCurrentConversation();
     renderSidebar();
     renderControls();
+    // A search answer requested earlier would too, and the new title may no
+    // longer match, so any search runs again.
+    runSearch();
   } catch (error) {
     if (capturedConnection !== connection) return;
     if (error instanceof ApiError && error.status === 404) {
@@ -350,7 +429,7 @@ async function rename(event) {
 }
 
 function openDelete(id) {
-  const conversation = conversations.find((item) => item.id === id);
+  const conversation = known(id);
   if (!conversation) return;
   deleteTarget = id;
   deleteError = "";
@@ -396,10 +475,14 @@ async function confirmDelete() {
 }
 
 function deleted(id, notice = false) {
-  const index = conversations.findIndex((item) => item.id === id);
-  focusAfterDelete = (conversations[index + 1] ?? conversations[index - 1])?.id ?? "";
+  const shown = searchResults ?? conversations;
+  const index = shown.findIndex((item) => item.id === id);
+  focusAfterDelete = (shown[index + 1] ?? shown[index - 1])?.id ?? "";
   forgetConversation(id, notice);
   $("delete-dialog").close();
+  // A search answer requested earlier would bring the row back, so any
+  // search runs again.
+  runSearch();
 }
 
 // Drops a deleted conversation and this tab's draft and pending text for it.
@@ -407,6 +490,7 @@ function forgetConversation(id, notice = false) {
   listGeneration += 1;
   forgotten.add(id);
   conversations = conversations.filter((item) => item.id !== id);
+  if (searchResults) searchResults = searchResults.filter((item) => item.id !== id);
   drafts.delete(id);
   outbox.delete(id);
   sending.delete(id);
@@ -428,8 +512,17 @@ function forgetConversation(id, notice = false) {
 // Keeps the list in activity order after an accepted message.
 function touchConversation(id, at) {
   const index = conversations.findIndex((item) => item.id === id);
+  if (index < 0) {
+    // A conversation found only by search joins the list once it has newer activity.
+    const found = searchResults?.find((item) => item.id === id);
+    if (!found || typeof at !== "string" || Date.parse(found.last_activity_at) >= Date.parse(at)) return;
+    const { match, ...conversation } = found;
+    insertByActivity({ ...conversation, last_activity_at: at });
+    listGeneration += 1;
+    return;
+  }
   // Nothing moves, so a list response already in flight stays valid.
-  if (index < 0 || typeof at !== "string" || Date.parse(conversations[index].last_activity_at) >= Date.parse(at)) return;
+  if (typeof at !== "string" || Date.parse(conversations[index].last_activity_at) >= Date.parse(at)) return;
   const [conversation] = conversations.splice(index, 1);
   conversation.last_activity_at = at;
   insertByActivity(conversation);
@@ -586,7 +679,7 @@ function renderControls() {
   $("stop").disabled = !signedIn || Boolean(busy?.cancel_requested) || stopping === busy?.id;
   $("run-progress").textContent = busy ? (busy.cancel_requested || stopping === busy.id ? "停止しています" : progress || "考えています") : "";
   $("run-progress").hidden = !busy;
-  const listedTitle = conversations.find((item) => item.id === selectedId)?.title;
+  const listedTitle = known(selectedId)?.title;
   $("conversation-title").textContent = currentConversation?.title ?? listedTitle ?? "会話";
   const actions = $("run-actions");
   actions.replaceChildren();
@@ -690,6 +783,7 @@ async function refreshConversations(capturedConnection = connection) {
   const result = await api("/conversations");
   if (capturedConnection !== connection || !signedIn || generation !== listGeneration) return;
   conversations = result.conversations.filter((item) => UUID.test(item.id));
+  hasMore = Boolean(result.has_more);
   listed = true;
   renderSidebar();
 }
@@ -712,6 +806,8 @@ function updateConversationTitle(id, title) {
   if (typeof title !== "string") return;
   const listed = conversations.find((item) => item.id === id);
   if (listed) listed.title = title;
+  const found = searchResults?.find((item) => item.id === id);
+  if (found) found.title = title;
   if (currentConversation?.id === id) currentConversation.title = title;
 }
 
@@ -800,6 +896,8 @@ function disconnect(message = "") {
   connectionAbort = new AbortController();
   cancelSelection();
   closeMenu();
+  clearSearch();
+  hasMore = false;
   for (const dialog of ["rename-dialog", "delete-dialog"]) if ($(dialog).open) $(dialog).close();
   sending.clear();
   forgotten.clear();
@@ -921,6 +1019,9 @@ async function createConversation() {
     // A list reload can already include it, and a send accepted meanwhile is
     // newer activity.
     if (!conversations.some((item) => item.id === result.id)) insertByActivity(result);
+    // The new conversation belongs in the full list, which a search answer
+    // still on its way would replace.
+    clearSearch();
     if (current(captured)) await selectConversation(result.id, true);
   } catch (error) {
     if (current(captured)) {
@@ -1308,7 +1409,9 @@ $("open-sidebar").addEventListener("click", () => setDrawer(true));
 $("close-sidebar").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });
 $("drawer-backdrop").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || !$("sidebar").classList.contains("open")) return;
+  // Escape during IME conversion only cancels the conversion. Safari ends
+  // composition before that key, which then arrives with keyCode 229.
+  if (event.key !== "Escape" || event.isComposing || event.keyCode === 229 || !$("sidebar").classList.contains("open")) return;
   // Escape closes an open dialog or menu first, not the drawer behind it.
   if (document.querySelector("dialog[open]") || $("conversation-menu").matches(":popover-open")) return;
   setDrawer(false);
@@ -1328,6 +1431,26 @@ $("conversation-menu").addEventListener("toggle", (event) => {
   markMenuRow(open);
 });
 $("conversation-list").addEventListener("scroll", closeMenu, { passive: true });
+// Any edit makes an answer for the previous text stale at once; the next
+// request still waits for the pause and for IME conversion to finish.
+$("conversation-query").addEventListener("compositionstart", () => { searchComposing = true; searchRequest += 1; clearTimeout(searchTimer); });
+$("conversation-query").addEventListener("compositionend", () => { searchComposing = false; scheduleSearch(); });
+$("conversation-query").addEventListener("input", (event) => {
+  searchRequest += 1;
+  if (!searchComposing && !event.isComposing) scheduleSearch();
+});
+$("conversation-query").addEventListener("keydown", (event) => {
+  if (event.isComposing || searchComposing || event.keyCode === 229) return;
+  if (event.key === "Enter") {
+    event.preventDefault();
+    runSearch();
+  } else if (event.key === "Escape" && $("conversation-query").value) {
+    // Clears the search before Escape can close the drawer.
+    event.preventDefault();
+    event.stopPropagation();
+    clearSearch();
+  }
+});
 window.addEventListener("resize", closeMenu);
 $("menu-rename").addEventListener("click", () => { closeMenu(); openRename(menuFor); });
 $("menu-delete").addEventListener("click", () => { closeMenu(); openDelete(menuFor); });
