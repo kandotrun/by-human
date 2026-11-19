@@ -9,8 +9,7 @@ ChatGPTプランでログインし、会話はすべて自分のPostgreSQLに保
 ブラウザからもiPhoneからも話しかけられます。
 
 by-humanは、自分で動かすRust製のサーバーひとつで動きます。<br>
-チャット画面を内蔵し、使えるツールは自分で指定したものだけ。ツールが最後まで動いたか分からないときは、
-勝手にやり直さず、止まってあなたに確認を求めます。
+チャット画面を内蔵し、使えるツールは自分で指定したものだけ。ツールが最後まで動いたか分からないときは、勝手にやり直さず、止まってあなたに確認を求めます。
 
 <sub>持ち主が毎日使っているOpenClawの機能を置き換えるために開発しています。単体で動き、Piは設計の参考にしているだけです。Pi・OpenClaw・Mukumoを動かす必要はありません。</sub>
 
@@ -26,8 +25,7 @@ by-humanは、自分で動かすRust製のサーバーひとつで動きます�
 </div>
 
 > [!NOTE]
-> by-humanはまだ初期段階で、小さな変更ごとに検証しながら育てています。
-> チャット画面は日本語です。`docs/`のガイドは英語で、ほとんどの末尾に短い日本語の説明があります。
+> by-humanはまだ初期段階で、小さな変更ごとに検証しながら育てています。チャット画面は日本語です。`docs/`のガイドは英語で、ほとんどの末尾に短い日本語の説明があります。
 
 ## 🎬 画面
 
@@ -72,8 +70,7 @@ by-humanは、自分で動かすRust製のサーバーひとつで動きます�
 
 ## 🚀 はじめかた
 
-必要なものは、macOSまたはLinux、Rust 1.96以降、by-human専用のPostgreSQL 17以降のデータベース、ChatGPTプランです。
-この方法でプランを使えるアカウントかどうかはOpenAIが決めます。詳しくは[ChatGPT-plan login](docs/openai-login.md)を参照してください。
+必要なものは、macOSまたはLinux、Rust 1.96以降、by-human専用のPostgreSQL 17以降のデータベース、ChatGPTプランです。この方法でプランを使えるアカウントかどうかはOpenAIが決めます。詳しくは[ChatGPT-plan login](docs/openai-login.md)を参照してください。
 
 ### 1. データベースを準備する
 
@@ -84,9 +81,7 @@ export DATABASE_URL='postgres://byhuman:local-test-only@127.0.0.1:5432/byhuman'
 cargo run -p by-human -- check
 ```
 
-`check`はマイグレーションを適用し、`by-human: PostgreSQL schema is ready`と表示します。
-上記のパスワードはローカル試験用の例です。秘密値は環境変数で渡し、Gitには保存しません。
-[`.env.example`](.env.example)は設定の一覧ですが、テンプレートなので自動では読み込まれません。
+`check`はマイグレーションを適用し、`by-human: PostgreSQL schema is ready`と表示します。上記のパスワードはローカル試験用の例です。秘密値は環境変数で渡し、Gitには保存しません。[`.env.example`](.env.example)は設定の一覧ですが、テンプレートなので自動では読み込まれません。
 
 <details>
 <summary>PostgreSQLがまだない場合：Dockerで起動する</summary>
@@ -109,14 +104,11 @@ cargo run -p by-human -- login
 cargo run -p by-human -- auth-status
 ```
 
-表示されたOpenAIのURLを、**同じコンピューターの**ブラウザで開いてください。ログインはローカルの`127.0.0.1`へのコールバックで完了します。
-`auth-status`は、`authenticated=true`や`plan_enabled=true`のような準備状態だけを表示します。
-`plan_enabled`が`false`なら、`login --enable-plan`でプランの利用を許可してください。
+表示されたOpenAIのURLを、**同じコンピューターの**ブラウザで開いてください。ログインはローカルの`127.0.0.1`へのコールバックで完了します。`auth-status`は、`authenticated=true`や`plan_enabled=true`のような準備状態だけを表示します。`plan_enabled`が`false`なら、`login --enable-plan`でプランの利用を許可してください。
 
 ### 3. サーバーを起動する
 
-サーバーには、OpenAIのログインとは別の専用トークンが必要です。空白を含まない32〜512文字のASCII文字列にしてください。
-一度だけ作り、パスワードマネージャーなどに保管します。変更すると、すべてのブラウザがログアウトします。
+サーバーには、OpenAIのログインとは別の専用トークンが必要です。空白を含まない32〜512文字のASCII文字列にしてください。一度だけ作り、パスワードマネージャーなどに保管します。変更すると、すべてのブラウザがログアウトします。
 
 ```sh
 openssl rand -hex 32   # 一度だけ。出力を保管する
@@ -138,13 +130,12 @@ iPhoneからサーバーに接続するにはHTTPSが必要です。両方の端
 
 1. by-humanを動かしているコンピューターで`tailscale serve --bg 4310`を実行します。`https://<machine>.<tailnet>.ts.net`のようなアドレスが表示されます。
 2. そのアドレスを末尾のスラッシュなしで、そのまま`BY_HUMAN_PUBLIC_ORIGIN`に設定し、`serve`を再起動します。
-3. iPhoneのSafariでアドレスを開いてサーバー用トークンでログインし、共有 → ホーム画面に追加 を選びます。
+3. iPhoneのSafariでアドレスを開いてサーバー用トークンでログインし、共有メニューから「ホーム画面に追加」を選びます。
 
 iPhoneでは、Returnで改行し、送信ボタンで送信します。
 
 > [!WARNING]
-> Tailscale Serveを使うと、tailnet内のすべての端末とユーザーがページを開けるようになります。会話はサーバー用トークンで守られます。
-> インターネットに公開してしまう`tailscale funnel`は使わないでください。Serveの設定は`tailscale serve reset`で消せます。
+> Tailscale Serveを使うと、tailnet内のすべての端末とユーザーがページを開けるようになります。会話はサーバー用トークンで守られます。インターネットに公開してしまう`tailscale funnel`は使わないでください。Serveの設定は`tailscale serve reset`で消せます。
 
 ## 🧰 MCPツールをつなぐ
 
@@ -173,11 +164,7 @@ export BY_HUMAN_MCP_CONFIG=/absolute/path/to/mcp.json
 cargo run -p by-human -- mcp list
 ```
 
-`mcp list`は接続して有効なツールをJSONで表示し、切断します。ツールは実行せず、データベースもChatGPTのログインも不要です。
-`serve`は起動時に同じファイルを読み込むので、変更したら再起動してください。
-stdioのサーバーは自分と同じユーザーで動き、サンドボックスではありません。信頼できるプログラムだけを指定してください。
-HTTPのサーバーにはHTTPS（ローカルならループバックのHTTP）で接続し、`bearer_token_env`で指定したトークンだけを使います。
-詳しくは[MCP tools](docs/mcp.md)を参照してください。
+`mcp list`は接続して有効なツールをJSONで表示し、切断します。ツールは実行せず、データベースもChatGPTのログインも不要です。`serve`は起動時に同じファイルを読み込むので、変更したら再起動してください。stdioのサーバーは自分と同じユーザーで動き、サンドボックスではありません。信頼できるプログラムだけを指定してください。HTTPのサーバーにはHTTPS（ローカルならループバックのHTTP）で接続し、`bearer_token_env`で指定したトークンだけを使います。詳しくは[MCP tools](docs/mcp.md)を参照してください。
 
 ## 🧭 しくみ
 
@@ -190,9 +177,7 @@ flowchart LR
     server --> tools["MCPサーバー<br>指定した<br>ツールだけ"]
 ```
 
-送ったメッセージは、それぞれ1つの**実行（run）**になります。by-humanは最初に実行をPostgreSQLへ保存し、それからモデルの返信をストリーミングして、モデルが求めたツールを呼び出します。
-ツールを呼ぶ前にはこれから行う内容を、呼んだ後には受け取った結果を記録します。
-画面には返信と進み具合を表示し、推論の内容やツールの生の出力はチャットの本文に混ぜません。
+送ったメッセージは、それぞれ1つの**実行**（run）になります。by-humanは最初に実行をPostgreSQLへ保存し、それからモデルの返信をストリーミングして、モデルが求めたツールを呼び出します。ツールを呼ぶ前にはこれから行う内容を、呼んだ後には受け取った結果を記録します。画面には返信と進み具合を表示し、推論の内容やツールの生の出力はチャットの本文に混ぜません。
 
 | 実行の状態 | 意味 |
 | --- | --- |
@@ -204,9 +189,7 @@ flowchart LR
 | `uncertain` | 結果を確かめられない。ツールが中断された、実行中にサーバーが再起動した、など |
 
 > [!IMPORTANT]
-> 停止は実行の終了を求める操作で、外部のツールが止まったことの証明にはなりません。by-humanもそのようには扱いません。
-> `uncertain`の実行がある会話は、確認するまで新しいメッセージを送れません（ほかの会話は使えます）。
-> 確認するとメモが記録され、会話を続けられます。古い処理を再実行したり、成功扱いにしたりはしません。
+> 停止は実行の終了を求める操作で、外部のツールが止まったことの証明にはなりません。by-humanもそのようには扱いません。`uncertain`の実行がある会話は、確認するまで新しいメッセージを送れません（ほかの会話は使えます）。確認するとメモが記録され、会話を続けられます。古い処理を再実行したり、成功扱いにしたりはしません。
 
 ## 🔧 設定
 
@@ -286,11 +269,9 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 ```
 
-`--all-features`で有効になる`postgres-tests`には`DATABASE_URL`が必要で、生成した試験用schemaで実際のPostgreSQLを使います。
-テストが既存のOpenClaw、Every、Mukumoのサービスに接続することはありません。
+`--all-features`で有効になる`postgres-tests`には`DATABASE_URL`が必要で、生成した試験用schemaで実際のPostgreSQLを使います。テストが既存のOpenClaw、Every、Mukumoのサービスに接続することはありません。
 
-ブラウザ契約テストは、同じRustのAPIとランナーを、合成モデルと隔離して生成したschemaで動かします。
-Node.jsはこのテストにだけ必要です。
+ブラウザ契約テストは、同じRustのAPIとランナーを、合成モデルと隔離して生成したschemaで動かします。Node.jsはこのテストにだけ必要です。
 
 ```sh
 cd web-tests
@@ -316,5 +297,4 @@ npm test
 
 このリポジトリには、まだライセンスがありません。
 
-by-humanは[Pi Agent Core](https://github.com/earendil-works/pi/blob/main/packages/agent/README.md)を設計の参考にしており、MCPクライアントには[公式のRust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk)を使っています。
-by-humanは独立したプロジェクトで、OpenAIとは関係ありません。
+by-humanは[Pi Agent Core](https://github.com/earendil-works/pi/blob/main/packages/agent/README.md)を設計の参考にしており、MCPクライアントには[公式のRust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk)を使っています。by-humanは独立したプロジェクトで、OpenAIとは関係ありません。
