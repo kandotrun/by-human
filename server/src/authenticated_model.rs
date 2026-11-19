@@ -17,11 +17,12 @@ pub struct ChatGptModel {
 }
 
 impl ChatGptModel {
-    pub fn new(auth: AuthManager, model: String) -> crate::engine::Result<Self> {
+    pub fn new(auth: AuthManager, model: String, web_search: bool) -> crate::engine::Result<Self> {
         // This template is never dispatched directly. with_access_token clones
         // its shared HTTP client and supplies a current token for every turn.
         let mut config = ProviderConfig::new(model, "managed-at-request-time".into());
         config.auth_mode = AuthMode::ChatGptPlan;
+        config.web_search = web_search;
         Ok(Self {
             auth,
             provider: OpenAIProvider::new(config)?,

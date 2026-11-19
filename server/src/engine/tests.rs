@@ -128,8 +128,13 @@ impl Fixture {
     }
 
     fn provider(&self, mode: AuthMode) -> OpenAIProvider {
+        self.provider_with_search(mode, false)
+    }
+
+    fn provider_with_search(&self, mode: AuthMode, web_search: bool) -> OpenAIProvider {
         let mut config = ProviderConfig::new("fixture-model".into(), "fixture-secret".into());
         config.auth_mode = mode;
+        config.web_search = web_search;
         OpenAIProvider::for_loopback_test(config, &self.url).unwrap()
     }
 }
@@ -225,6 +230,69 @@ fn message(text: &str) -> Value {
 
 fn input() -> Vec<Value> {
     vec![json!({ "role": "user", "content": "今の時刻を教えて" })]
+}
+
+/// A completed hosted search, shaped like the Responses `web_search_call` item.
+fn web_search(id: &str) -> Value {
+    json!({ "type": "web_search_call", "id": id, "status": "completed",
+        "action": { "type": "search", "query": "by-human release notes" } })
+}
+
+/// An answer whose citation is both a Markdown link and a `url_citation`.
+fn cited_message(text: &str) -> Value {
+    json!({ "type": "message", "id": "m_cited", "role": "assistant", "status": "completed",
+        "content": [{ "type": "output_text", "text": text, "annotations": [{
+            "type": "url_citation", "start_index": 0, "end_index": text.chars().count(),
+            "url": "https://example.com/news", "title": "Example news"
+        }] }] })
+}
+
+const CITED: &str = "[Example news](https://example.com/news) によると公開されました。";
+
+/// An answer that cites each `(url, title)` source only as a `url_citation`.
+fn annotated_message(text: &str, sources: &[(&str, Option<&str>)]) -> Value {
+    let annotations: Vec<Value> = sources
+        .iter()
+        .map(|(url, title)| {
+            let mut citation = json!({ "type": "url_citation", "start_index": 0,
+                "end_index": text.chars().count(), "url": url });
+            if let Some(title) = title {
+                citation["title"] = json!(title);
+            }
+            citation
+        })
+        .collect();
+    json!({ "type": "message", "id": "m_annotated", "role": "assistant", "status": "completed",
+        "content": [{ "type": "output_text", "text": text, "annotations": annotations }] })
+}
+
+/// Streams `text`, then completes it as a searched `answer`. Returns the
+/// settled result and the text that the deltas carried.
+async fn searched_answer(text: &str, answer: Value) -> (EngineResult, String) {
+    let fixture = Fixture::start(vec![vec![
+        frame(json!({"type":"response.output_text.delta","delta":text})),
+        complete(vec![web_search("ws_1"), answer]),
+    ]])
+    .await;
+    let sink = Sink::default();
+    let result = Engine::new(
+        Arc::new(fixture.provider_with_search(AuthMode::ChatGptPlan, true)),
+        Limits::default(),
+    )
+    .run(input(), &sink, CancellationToken::new())
+    .await
+    .unwrap();
+    let streamed = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    (result, streamed)
 }
 
 #[tokio::test]
@@ -1068,4 +1136,498 @@ fn registry_rejects_duplicate_and_invalid_names_without_replacing_tools() {
     }
     assert_eq!(registry.definitions().len(), 1);
     assert_eq!(registry.definitions()[0].name, "get_current_time");
+}
+
+#[tokio::test]
+async fn a_completed_hosted_search_with_an_answer_needs_no_local_tool() {
+    for mode in [AuthMode::ApiKey, AuthMode::ChatGptPlan] {
+        let fixture = Fixture::start(vec![vec![
+            frame(json!({"type":"response.output_text.delta","delta":CITED})),
+            complete(vec![web_search("ws_1"), cited_message(CITED)]),
+        ]])
+        .await;
+        let sink = Sink::default();
+        let result = Engine::new(Arc::new(fixture.provider(mode)), Limits::default())
+            .run(input(), &sink, CancellationToken::new())
+            .await
+            .unwrap();
+        // The text carries the Markdown link, so annotations need no storage.
+        assert_eq!(result.text, CITED);
+        assert_eq!(result.new_items, [web_search("ws_1"), cited_message(CITED)]);
+        assert_eq!(sink.before.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.after.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_source_cited_only_by_an_annotation_is_listed_after_the_reply() {
+    let text = "公開されました。";
+    let answer = annotated_message(
+        text,
+        &[
+            ("https://example.com/news", Some(r"Example [news] \ wire")),
+            ("https://example.org/report?id=1", None),
+            // A source cited again is listed once, where it first appeared.
+            ("https://example.com/news", Some("Example news")),
+            ("https://example.net/page", Some(" \n ")),
+            ("https://example.com/smile:)", Some("Smile\n\n# (draft)")),
+        ],
+    );
+    let (result, streamed) = searched_answer(text, answer.clone()).await;
+    // The title or, without one, the host labels each link. Neither can
+    // break the link or the list.
+    let listed = [
+        r"- [Example \[news\] \\ wire](https://example.com/news)",
+        "- [example.org](https://example.org/report?id=1)",
+        "- [example.net](https://example.net/page)",
+        r"- [Smile # (draft)](https://example.com/smile:\))",
+    ];
+    assert_eq!(
+        result.text,
+        format!("{text}\n\n出典:\n{}", listed.join("\n"))
+    );
+    // Only the settled text gains the list: the stream and the canonical
+    // items keep what the provider sent.
+    assert_eq!(streamed, text);
+    assert_eq!(result.new_items, [web_search("ws_1"), answer]);
+}
+
+#[tokio::test]
+async fn a_source_the_reply_already_links_is_not_listed_again() {
+    let text = "[Example news](https://example.com/news) と https://example.net/live によると公開されました。";
+    let linked = [
+        ("https://example.com/news", Some("Example news")),
+        ("https://example.net/live", Some("Live")),
+    ];
+    let unlinked = ("https://example.org/report", Some("Report"));
+    for (sources, listed) in [
+        // A reply that links every source it cites is unchanged, byte for byte.
+        (linked.to_vec(), ""),
+        (
+            [&linked[..], &[unlinked]].concat(),
+            "\n\n出典:\n- [Report](https://example.org/report)",
+        ),
+    ] {
+        let (result, _) = searched_answer(text, annotated_message(text, &sources)).await;
+        assert_eq!(result.text, format!("{text}{listed}"));
+    }
+}
+
+#[tokio::test]
+async fn a_source_whose_address_only_starts_a_linked_address_is_still_listed() {
+    // The reply links longer addresses that merely begin with the cited ones.
+    let text =
+        "[別の記事](https://example.com/newsroom) と https://example.net/live/today を見ました。";
+    let sources = [
+        ("https://example.com/news", Some("News")),
+        ("https://example.net/live", Some("Live")),
+    ];
+    let (result, _) = searched_answer(text, annotated_message(text, &sources)).await;
+    assert_eq!(
+        result.text,
+        format!(
+            "{text}\n\n出典:\n- [News](https://example.com/news)\n- [Live](https://example.net/live)"
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_cited_source_that_is_not_a_web_address_is_never_listed() {
+    let text = "公開されました。";
+    let script = ("javascript:alert(1)", Some("Example news"));
+    for (sources, listed) in [
+        (vec![script], ""),
+        (
+            vec![
+                script,
+                ("JavaScript://example.com/%0Aalert(1)", Some("Example news")),
+                ("mailto:press@example.com", Some("Press")),
+                ("/news", Some("Relative")),
+                ("https://example.org/report", Some("Report")),
+            ],
+            "\n\n出典:\n- [Report](https://example.org/report)",
+        ),
+    ] {
+        let (result, _) = searched_answer(text, annotated_message(text, &sources)).await;
+        assert_eq!(result.text, format!("{text}{listed}"));
+    }
+}
+
+#[tokio::test]
+async fn a_hosted_search_before_a_function_call_is_replayed_in_order() {
+    let reasoning =
+        json!({"type":"reasoning","id":"r_1","summary":[],"encrypted_content":"opaque"});
+    let done = |index: usize, item: Value| {
+        frame(json!({"type":"response.output_item.done","output_index":index,"item":item}))
+    };
+    let fixture = Fixture::start(vec![
+        // A stateless plan stream can leave the terminal output empty.
+        vec![
+            done(0, reasoning.clone()),
+            done(1, web_search("ws_1")),
+            done(2, call("clock")),
+            complete(vec![]),
+        ],
+        vec![complete(vec![cited_message(CITED)])],
+    ])
+    .await;
+    let sink = Sink::default();
+    let result = Engine::new(
+        Arc::new(fixture.provider_with_search(AuthMode::ChatGptPlan, true)),
+        Limits::default(),
+    )
+    .run(input(), &sink, CancellationToken::new())
+    .await
+    .unwrap();
+    assert_eq!(result.text, CITED);
+    let requests = fixture.state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    // Stateless requests replay every output item in its original order.
+    let replayed = requests[1]["input"].as_array().unwrap();
+    assert_eq!(replayed.len(), 5);
+    assert_eq!(
+        replayed[..4],
+        [
+            input()[0].clone(),
+            reasoning,
+            web_search("ws_1"),
+            call("clock")
+        ]
+    );
+    assert_eq!(replayed[4]["type"], "function_call_output");
+    assert_eq!(replayed[4]["call_id"], "clock");
+    // The search also stays in the run's canonical items for later turns.
+    assert_eq!(result.new_items[1], web_search("ws_1"));
+    assert_eq!(sink.before.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.after.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_conversation_that_searched_continues_without_its_searches_once_search_is_off() {
+    // An earlier run searched and answered; this is the next message.
+    let history = vec![
+        input()[0].clone(),
+        web_search("ws_1"),
+        cited_message(CITED),
+        json!({ "role": "user", "content": "続きを教えて" }),
+    ];
+    for mode in [AuthMode::ApiKey, AuthMode::ChatGptPlan] {
+        for enabled in [true, false] {
+            let fixture = Fixture::start(vec![vec![complete(vec![message("ok")])]]).await;
+            let result = Engine::new(
+                Arc::new(fixture.provider_with_search(mode, enabled)),
+                Limits::default(),
+            )
+            .run(history.clone(), &Sink::default(), CancellationToken::new())
+            .await
+            .unwrap();
+            assert_eq!(result.text, "ok");
+            let requests = fixture.state.requests.lock().unwrap();
+            let request = &requests[0];
+            let expected = if enabled {
+                history.clone()
+            } else {
+                // Only the search is left out; the cited reply and order stay.
+                vec![history[0].clone(), history[2].clone(), history[3].clone()]
+            };
+            assert_eq!(request["input"], json!(expected), "{mode:?} {enabled}");
+            let search = json!({"type": "web_search"});
+            assert_eq!(
+                request["tools"].as_array().unwrap().contains(&search),
+                enabled,
+                "{mode:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn other_hosted_items_and_a_search_without_an_answer_are_refused() {
+    for output in [
+        vec![
+            json!({"type":"file_search_call","id":"fs_1","status":"completed","queries":["x"]}),
+            message("x"),
+        ],
+        vec![
+            json!({"type":"image_generation_call","id":"ig_1","status":"completed","result":""}),
+            message("x"),
+        ],
+        vec![
+            json!({"type":"computer_call","id":"cu_1","call_id":"cu_1","status":"completed",
+                "action":{"type":"screenshot"},"pending_safety_checks":[]}),
+            message("x"),
+        ],
+        vec![web_search("ws_1")],
+    ] {
+        let fixture = Fixture::start(vec![vec![complete(output)]]).await;
+        let sink = Sink::default();
+        let error = Engine::new(
+            Arc::new(fixture.provider(AuthMode::ApiKey)),
+            Limits::default(),
+        )
+        .run(input(), &sink, CancellationToken::new())
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, EngineErrorKind::Protocol);
+        assert_eq!(sink.before.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// The stream of a search that OpenAI has started but not finished.
+fn search_progress(id: &str) -> Vec<Vec<u8>> {
+    vec![
+        frame(json!({"type":"response.output_item.added","output_index":0,
+            "item":{"type":"web_search_call","id":id,"status":"in_progress"}})),
+        frame(
+            json!({"type":"response.web_search_call.in_progress","output_index":0,
+            "item_id":id,"sequence_number":1}),
+        ),
+        frame(
+            json!({"type":"response.web_search_call.searching","output_index":0,
+            "item_id":id,"sequence_number":2}),
+        ),
+    ]
+}
+
+fn hosted_search(started: bool, id: &str) -> RuntimeEvent {
+    let (call_id, name) = (id.to_owned(), "web_search".to_owned());
+    if started {
+        RuntimeEvent::HostedToolStarted { call_id, name }
+    } else {
+        RuntimeEvent::HostedToolCompleted { call_id, name }
+    }
+}
+
+#[tokio::test]
+async fn hosted_search_progress_is_reported_once_without_a_tool_intent() {
+    let item = |index: usize, kind: &str, item: Value| {
+        frame(
+            json!({"type":format!("response.output_item.{kind}"),"output_index":index,"item":item}),
+        )
+    };
+    let mut chunks = search_progress("ws_1");
+    chunks.extend([
+        frame(
+            json!({"type":"response.web_search_call.completed","output_index":0,
+            "item_id":"ws_1","sequence_number":3}),
+        ),
+        item(0, "done", web_search("ws_1")),
+        // A search can also be reported by its output item alone.
+        item(
+            1,
+            "added",
+            json!({"type":"web_search_call","id":"ws_2","status":"in_progress"}),
+        ),
+        item(1, "done", web_search("ws_2")),
+        frame(json!({"type":"response.output_text.delta","delta":CITED})),
+        item(2, "done", cited_message(CITED)),
+        complete(vec![]),
+    ]);
+    let fixture = Fixture::start(vec![chunks]).await;
+    let sink = Sink::default();
+    let result = Engine::new(
+        Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
+        Limits::default(),
+    )
+    .run(input(), &sink, CancellationToken::new())
+    .await
+    .unwrap();
+    assert_eq!(result.text, CITED);
+    assert_eq!(
+        *sink.events.lock().unwrap(),
+        [
+            RuntimeEvent::ModelStarted { request: 1 },
+            hosted_search(true, "ws_1"),
+            hosted_search(false, "ws_1"),
+            hosted_search(true, "ws_2"),
+            hosted_search(false, "ws_2"),
+            RuntimeEvent::TextDelta {
+                delta: CITED.into()
+            },
+        ]
+    );
+    assert_eq!(sink.before.load(Ordering::SeqCst), 0);
+    assert_eq!(sink.after.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn hosted_search_progress_without_a_usable_item_id_is_skipped() {
+    for progress in [
+        json!({"type":"response.web_search_call.searching","output_index":0}),
+        json!({"type":"response.web_search_call.searching","output_index":0,"item_id":""}),
+        json!({"type":"response.web_search_call.in_progress","output_index":0,
+            "item_id":"x".repeat(257)}),
+        json!({"type":"response.output_item.added","output_index":0,
+            "item":{"type":"web_search_call","status":"in_progress"}}),
+        json!({"type":"response.web_search_call.completed","output_index":0,"item_id":""}),
+        json!({"type":"response.output_item.done","output_index":0,
+            "item":{"type":"web_search_call","status":"completed"}}),
+    ] {
+        let fixture = Fixture::start(vec![vec![
+            frame(progress),
+            frame(json!({"type":"response.output_text.delta","delta":CITED})),
+            complete(vec![web_search("ws_1"), cited_message(CITED)]),
+        ]])
+        .await;
+        let sink = Sink::default();
+        // Only the progress is lost: the stream goes on and the reply completes.
+        let result = Engine::new(
+            Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
+            Limits::default(),
+        )
+        .run(input(), &sink, CancellationToken::new())
+        .await
+        .unwrap();
+        assert_eq!(result.text, CITED);
+        assert_eq!(
+            *sink.events.lock().unwrap(),
+            [
+                RuntimeEvent::ModelStarted { request: 1 },
+                RuntimeEvent::TextDelta {
+                    delta: CITED.into()
+                },
+            ]
+        );
+    }
+}
+
+/// Search items that no later request could replay: the Responses input
+/// requires a `web_search_call` ID, bounded here like a call ID.
+fn searches_without_a_usable_id() -> Vec<Value> {
+    let mut missing = web_search("ws_x");
+    missing.as_object_mut().unwrap().remove("id");
+    vec![missing, web_search(""), web_search(&"x".repeat(257))]
+}
+
+#[tokio::test]
+async fn a_streamed_search_without_a_usable_id_is_not_replayed_in_the_next_turn() {
+    let done = |index: usize, item: Value| {
+        frame(json!({"type":"response.output_item.done","output_index":index,"item":item}))
+    };
+    for unusable in searches_without_a_usable_id() {
+        let fixture = Fixture::start(vec![
+            // A stateless plan stream can leave the terminal output empty.
+            vec![
+                done(0, web_search("ws_1")),
+                done(1, unusable),
+                frame(json!({"type":"response.output_text.delta","delta":CITED})),
+                done(2, cited_message(CITED)),
+                complete(vec![]),
+            ],
+            vec![complete(vec![message("ok")])],
+        ])
+        .await;
+        let engine = Engine::new(
+            Arc::new(fixture.provider_with_search(AuthMode::ChatGptPlan, true)),
+            Limits::default(),
+        );
+        let first = engine
+            .run(input(), &Sink::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(first.text, CITED);
+        // The next message replays the first turn's stored items.
+        let next = json!({ "role": "user", "content": "続きを教えて" });
+        let history = [input(), first.new_items, vec![next.clone()]].concat();
+        let second = engine
+            .run(history, &Sink::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(second.text, "ok");
+        let requests = fixture.state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        // Only the unusable search is left out; the rest keeps its order.
+        let expected = vec![
+            input()[0].clone(),
+            web_search("ws_1"),
+            cited_message(CITED),
+            next,
+        ];
+        assert_eq!(requests[1]["input"], json!(expected));
+    }
+}
+
+#[tokio::test]
+async fn a_terminal_search_without_a_usable_id_is_not_kept_for_replay() {
+    for unusable in searches_without_a_usable_id() {
+        let fixture = Fixture::start(vec![vec![
+            frame(json!({"type":"response.output_text.delta","delta":CITED})),
+            complete(vec![web_search("ws_1"), unusable, cited_message(CITED)]),
+        ]])
+        .await;
+        let result = Engine::new(
+            Arc::new(fixture.provider_with_search(AuthMode::ApiKey, true)),
+            Limits::default(),
+        )
+        .run(input(), &Sink::default(), CancellationToken::new())
+        .await
+        .unwrap();
+        assert_eq!(result.text, CITED);
+        // These stored items are what the next turn replays.
+        assert_eq!(result.new_items, [web_search("ws_1"), cited_message(CITED)]);
+    }
+}
+
+#[tokio::test]
+async fn web_search_is_a_hosted_sibling_tool_and_the_instructions_follow_it() {
+    for mode in [AuthMode::ApiKey, AuthMode::ChatGptPlan] {
+        for enabled in [true, false] {
+            let fixture = Fixture::start(vec![vec![complete(vec![message("ok")])]]).await;
+            let mut config = ProviderConfig::new("fixture-model".into(), "fixture-secret".into());
+            config.auth_mode = mode;
+            config.web_search = enabled;
+            // A refreshed plan token keeps every request option.
+            let provider = OpenAIProvider::for_loopback_test(config, &fixture.url)
+                .unwrap()
+                .with_access_token("fixture-refreshed")
+                .unwrap();
+            Engine::new(Arc::new(provider), Limits::default())
+                .run(input(), &Sink::default(), CancellationToken::new())
+                .await
+                .unwrap();
+            let requests = fixture.state.requests.lock().unwrap();
+            let request = &requests[0];
+            let tools = request["tools"].as_array().unwrap();
+            let search = json!({"type": "web_search"});
+            // The hosted tool is a top-level sibling, never a namespaced function.
+            assert_eq!(
+                tools.iter().filter(|tool| **tool == search).count(),
+                usize::from(enabled),
+                "{mode:?}"
+            );
+            if enabled {
+                assert_eq!(tools.last(), Some(&search));
+            }
+            let functions = if mode == AuthMode::ChatGptPlan {
+                assert_eq!(tools.len(), 1 + usize::from(enabled));
+                assert_eq!(tools[0]["type"], "namespace");
+                tools[0]["tools"].as_array().unwrap().clone()
+            } else {
+                tools[..tools.len() - usize::from(enabled)].to_vec()
+            };
+            assert_eq!(functions.len(), 1);
+            assert_eq!(functions[0]["type"], "function");
+            assert_eq!(functions[0]["name"], "get_current_time");
+            assert_eq!(request["include"], json!(["reasoning.encrypted_content"]));
+            let instructions = request["instructions"].as_str().unwrap();
+            assert!(instructions.contains("Use get_current_time when current UTC time is needed."));
+            assert_eq!(instructions.to_lowercase().contains("web"), enabled);
+            assert_eq!(
+                instructions
+                    .contains("You can search the web for current or external information."),
+                enabled
+            );
+            assert_eq!(
+                instructions.contains("Cite the sources you use inline as Markdown links."),
+                enabled
+            );
+            assert_eq!(
+                instructions.contains(
+                    "Never claim that you searched the web unless search results are present."
+                ),
+                enabled
+            );
+        }
+    }
 }

@@ -27,6 +27,15 @@ The same configuration is used by `serve`. Start it with the database, server
 authentication and ChatGPT login described in the [README](../README.md).
 The built-in clock remains available alongside configured MCP tools.
 
+OpenAI's hosted web search is offered in the same requests unless
+`BY_HUMAN_WEB_SEARCH=off`. Pages read during a search are untrusted input: a
+page can steer the model into calling configured tools and putting their
+results, or conversation content, into search queries, opened page URLs or
+links in the reply, which the chat page makes clickable. While configured tools
+can read private data, set `BY_HUMAN_WEB_SEARCH=off`. OpenAI recommends keeping
+public web search and private lookups in separate requests
+([prompt injection](https://developers.openai.com/api/docs/guides/tools-connectors-mcp#prompt-injection)).
+
 Each server must have:
 
 - A unique ID of 1–32 ASCII letters, digits or underscores.
@@ -86,6 +95,11 @@ DBやChatGPT認証も不要です。同じ設定を`serve`が読み込みます�
 stdioの実行ファイルは絶対パスを指定し、追加の環境変数は`env`で名前だけ指定します。
 HTTPの認証も`bearer_token_env`で指定した環境変数だけを使用します。
 エンドポイントに秘密値が含まれる場合も、設定ファイルを公開しないでください。
+
+OpenAIのWeb検索は、`BY_HUMAN_WEB_SEARCH=off`にしない限りMCPツールと同じ要求で使えます。
+検索中に読むページは信頼できない入力で、ツールの結果や会話の内容を検索語、開くページのURL、
+返信内のリンクに含めるよう、モデルを誘導することがあります。設定したツールで個人的なデータを
+読める間は、`BY_HUMAN_WEB_SEARCH=off`にしてください。
 
 実行前に引数を検証し、PostgreSQLへ開始を記録します。結果が届いた場合は、
 MCPのエラー結果も含めて記録してからモデルへ渡します。停止・切断・タイムアウトにより

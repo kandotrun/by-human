@@ -81,6 +81,10 @@ pub enum RuntimeEvent {
     TextDelta { delta: String },
     ToolStarted { call_id: String, name: String },
     ToolCompleted { call_id: String, name: String },
+    // Progress of a tool that runs at the provider, such as web search.
+    // Nothing runs locally, so it has no intent, receipt or unknown outcome.
+    HostedToolStarted { call_id: String, name: String },
+    HostedToolCompleted { call_id: String, name: String },
     ModelStarted { request: usize },
 }
 
@@ -222,6 +226,8 @@ impl Engine {
                 return Err(protocol_error());
             }
             if calls.is_empty() {
+                let sources = unlinked_sources(&result.new_items, &result.text);
+                result.text.push_str(&sources);
                 return Ok(result);
             }
             // Do not execute a tool if no model request remains to consume its
@@ -376,7 +382,11 @@ fn parse_calls(
                     return Err(protocol_error());
                 }
             }
-            Some("reasoning") => {}
+            // A hosted web search already ran at OpenAI inside this response.
+            // Nothing runs locally, so it needs no intent or receipt. It stays
+            // in the replayed input: stateless requests resend every item
+            // (the provider leaves it out only while search is off).
+            Some("reasoning" | "web_search_call") => {}
             // Never silently complete a run containing an unsupported action.
             _ => return Err(protocol_error()),
         }
@@ -397,6 +407,84 @@ fn public_text(output: &[Value]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// The web pages that `url_citation` annotations cite but the reply text never
+/// mentions, as a Markdown list to end the settled reply. The chat page shows a
+/// source only as a link in the text, so such a source would otherwise be
+/// lost. Empty when there is nothing to add.
+fn unlinked_sources(output: &[Value], text: &str) -> String {
+    let citations = output
+        .iter()
+        .filter(|item| item["type"] == "message" && item["role"] == "assistant")
+        .filter_map(|item| item["content"].as_array())
+        .flatten()
+        .filter(|content| content["type"] == "output_text")
+        .filter_map(|content| content["annotations"].as_array())
+        .flatten()
+        .filter(|annotation| annotation["type"] == "url_citation");
+    let mut seen = HashSet::new();
+    let mut sources = String::new();
+    for citation in citations {
+        let Some(cited) = citation["url"].as_str() else {
+            continue;
+        };
+        // Only web addresses become links, never javascript: and the like.
+        let Some(url) = reqwest::Url::parse(cited)
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https"))
+        else {
+            continue;
+        };
+        // Each source counts once, where it is first cited.
+        if !seen.insert(url.as_str().to_owned()) || mentions(text, cited) {
+            continue;
+        }
+        let title = citation["title"]
+            .as_str()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let label = if title.is_empty() {
+            url.host_str().unwrap_or_default()
+        } else {
+            title.as_str()
+        };
+        sources.push_str(&format!(
+            "\n- [{}]({})",
+            escape_markdown(label, &['\\', '[', ']']),
+            escape_markdown(url.as_str(), &['\\', '(', ')'])
+        ));
+    }
+    if sources.is_empty() {
+        sources
+    } else {
+        format!("\n\n出典:{sources}")
+    }
+}
+
+/// True when the text contains the whole address, not only the start of a
+/// longer one such as `/newsroom` for `/news`. Doubtful cases count as absent,
+/// so a source is listed twice at worst, never dropped.
+fn mentions(text: &str, url: &str) -> bool {
+    text.match_indices(url).any(|(start, _)| {
+        text[start + url.len()..].chars().next().is_none_or(|next| {
+            !(next.is_ascii_alphanumeric() || "-._~/?#@!$&*+,;=%:".contains(next))
+        })
+    })
+}
+
+/// Backslash-escapes the characters that would end a Markdown link part early.
+fn escape_markdown(text: &str, special: &[char]) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for char in text.chars() {
+        if special.contains(&char) {
+            escaped.push('\\');
+        }
+        escaped.push(char);
+    }
+    escaped
 }
 
 pub(crate) fn protocol_error() -> EngineError {

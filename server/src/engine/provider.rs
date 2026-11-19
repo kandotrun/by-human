@@ -3,8 +3,14 @@
 //! Protocol sources:
 //! https://developers.openai.com/api/docs/guides/function-calling
 //! https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
+//! https://developers.openai.com/api/reference/resources/responses/streaming-events
+//! https://developers.openai.com/api/docs/guides/tools-web-search
 
-use std::{collections::BTreeMap, net::IpAddr, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    net::IpAddr,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -17,6 +23,11 @@ use super::{
     EngineError, EngineErrorKind, Model, ModelTurn, Result, RuntimeEvent, RuntimeSink,
     ToolDefinition, checkpoint, protocol_error, sse::Decoder,
 };
+
+/// The tool name that run events report for OpenAI's hosted web search.
+const WEB_SEARCH: &str = "web_search";
+/// Added to the instructions only while the hosted web search is offered.
+const WEB_SEARCH_INSTRUCTIONS: &str = "You can search the web for current or external information. Cite the sources you use inline as Markdown links. Never claim that you searched the web unless search results are present.";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -33,7 +44,10 @@ pub struct ProviderConfig {
     pub max_output_tokens: u32,
     pub request_timeout: Duration,
     pub max_stream_bytes: usize,
+    /// Requests add web search guidance while `web_search` is on.
     pub instructions: String,
+    /// Offer OpenAI's hosted web search. It runs at OpenAI, never locally.
+    pub web_search: bool,
 }
 
 impl ProviderConfig {
@@ -43,6 +57,7 @@ impl ProviderConfig {
             max_output_tokens: 1024, request_timeout: Duration::from_secs(60),
             max_stream_bytes: 2 * 1024 * 1024,
             instructions: "You are by-human, the user's personal agent. Be clear and helpful. Use get_current_time when current UTC time is needed. Never claim that a tool ran unless its result is present.".into(),
+            web_search: false,
         }
     }
 }
@@ -80,6 +95,7 @@ impl OpenAIProvider {
                 request_timeout: self.config.request_timeout,
                 max_stream_bytes: self.config.max_stream_bytes,
                 instructions: self.config.instructions.clone(),
+                web_search: self.config.web_search,
             },
             endpoint: self.endpoint.clone(),
             client: self.client.clone(),
@@ -141,6 +157,15 @@ impl OpenAIProvider {
     }
 
     fn body(&self, input: &[Value], definitions: &[ToolDefinition]) -> Value {
+        // A request that offers no web search must not replay an earlier one.
+        // The ChatGPT backend has been reported to fail such a response, so a
+        // conversation that searched could never answer again once search is
+        // off (https://github.com/openai/codex/issues/51962). Storage keeps
+        // the items, and the reply text keeps its Markdown links.
+        let input: Vec<&Value> = input
+            .iter()
+            .filter(|item| self.config.web_search || item["type"] != "web_search_call")
+            .collect();
         let functions: Vec<_> = definitions
             .iter()
             .map(|definition| {
@@ -151,14 +176,21 @@ impl OpenAIProvider {
                 })
             })
             .collect();
-        let tools = match self.config.auth_mode {
+        let mut tools = match self.config.auth_mode {
             AuthMode::ApiKey => functions,
             AuthMode::ChatGptPlan => vec![json!({
                 "type": "namespace", "name": "by_human", "description": "Configured by-human tools", "tools": functions
             })],
         };
+        let mut instructions = self.config.instructions.clone();
+        if self.config.web_search {
+            // A namespace holds only function and custom tools, so the hosted
+            // search is always a top-level sibling.
+            tools.push(json!({ "type": "web_search" }));
+            instructions = format!("{instructions} {WEB_SEARCH_INSTRUCTIONS}");
+        }
         let mut body = json!({
-            "model": self.config.model, "instructions": self.config.instructions,
+            "model": self.config.model, "instructions": instructions,
             "input": input, "tools": tools, "store": false, "stream": true,
             "include": ["reasoning.encrypted_content"], "parallel_tool_calls": false
         });
@@ -209,6 +241,7 @@ impl OpenAIProvider {
         let mut stream = response.bytes_stream();
         let mut decoder = Decoder::default();
         let mut completed_items = BTreeMap::new();
+        let mut searches = HostedSearches::default();
         let mut received = 0usize;
         loop {
             let bytes = tokio::select! {
@@ -248,9 +281,25 @@ impl OpenAIProvider {
                             .filter(|item| item.is_object())
                             .cloned()
                             .ok_or_else(protocol_error)?;
+                        let finished = if item["type"] == "web_search_call" {
+                            searches.complete(&item["id"])
+                        } else {
+                            None
+                        };
                         if completed_items.insert(index, item).is_some() {
                             return Err(protocol_error());
                         }
+                        report(sink, cancel, finished).await?;
+                    }
+                    "response.output_item.added" if value["item"]["type"] == "web_search_call" => {
+                        report(sink, cancel, searches.start(&value["item"]["id"])).await?;
+                    }
+                    "response.web_search_call.in_progress"
+                    | "response.web_search_call.searching" => {
+                        report(sink, cancel, searches.start(&value["item_id"])).await?;
+                    }
+                    "response.web_search_call.completed" => {
+                        report(sink, cancel, searches.complete(&value["item_id"])).await?;
                     }
                     "response.output_text.delta" | "response.refusal.delta" => {
                         let delta = value["delta"].as_str().ok_or_else(protocol_error)?;
@@ -278,6 +327,14 @@ impl OpenAIProvider {
                             }
                             output = completed_items.into_values().collect();
                         }
+                        // Later requests replay a search item, and the Responses
+                        // input requires its ID, so one without a usable ID is
+                        // left out (its progress already went unreported).
+                        // Every other item keeps its place.
+                        output.retain(|item| {
+                            item["type"] != "web_search_call"
+                                || hosted_item_id(&item["id"]).is_some()
+                        });
                         return Ok(ModelTurn {
                             output,
                             usage: response.get("usage").filter(|v| !v.is_null()).cloned(),
@@ -300,6 +357,59 @@ impl OpenAIProvider {
             }
         }
     }
+}
+
+/// Progress of OpenAI-hosted web searches within one response. The search
+/// runs at OpenAI, so these events describe it and authorize nothing.
+#[derive(Default)]
+struct HostedSearches {
+    started: HashSet<String>,
+    completed: HashSet<String>,
+}
+
+impl HostedSearches {
+    /// Report a search once, from whichever stream event shows it first.
+    fn start(&mut self, id: &Value) -> Option<RuntimeEvent> {
+        let id = hosted_item_id(id)?;
+        self.started
+            .insert(id.clone())
+            .then(|| RuntimeEvent::HostedToolStarted {
+                call_id: id,
+                name: WEB_SEARCH.into(),
+            })
+    }
+
+    /// End a started search once; its completed event and item both end it.
+    fn complete(&mut self, id: &Value) -> Option<RuntimeEvent> {
+        let id = hosted_item_id(id)?;
+        (self.started.contains(&id) && self.completed.insert(id.clone())).then(|| {
+            RuntimeEvent::HostedToolCompleted {
+                call_id: id,
+                name: WEB_SEARCH.into(),
+            }
+        })
+    }
+}
+
+/// Progress is stored as a run event, so its item ID is bounded like a call ID.
+/// Without a usable ID the progress goes unreported; the response continues.
+fn hosted_item_id(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 256)
+        .map(str::to_owned)
+}
+
+async fn report(
+    sink: &dyn RuntimeSink,
+    cancel: &CancellationToken,
+    event: Option<RuntimeEvent>,
+) -> Result<()> {
+    if let Some(event) = event {
+        checkpoint(sink, cancel).await?;
+        sink.emit(event).await?;
+    }
+    Ok(())
 }
 
 #[async_trait]

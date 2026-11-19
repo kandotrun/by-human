@@ -985,7 +985,9 @@ test('a status pill and typing dots show what the agent is doing', async ({ page
   await expect(page.locator('#run-progress')).toBeHidden();
 });
 
-test('the tool label survives an event stream reconnect', async ({ page }) => {
+// Sends a message whose tool waits for Stop, ends the first event stream
+// right after tool.started and checks the label after the reconnect.
+async function labelSurvivesReconnect(page, message, label, stopped) {
   await connect(page);
   await newConversation(page);
   const cursors = [];
@@ -1012,16 +1014,59 @@ test('the tool label survives an event stream reconnect', async ({ page }) => {
     delivered = /^id:\s*(\d+)$/m.exec(events.at(-1))[1];
     await route.fulfill({ status: 200, contentType: 'text/event-stream', body: `${events.join('\n\n')}\n\n` });
   });
-  const sent = await send(page, '復旧テスト');
+  const sent = await send(page, message);
   try {
     // The reconnect resumes after tool.started, so no new event restates it.
     await expect.poll(() => cursors.length).toBe(2);
     expect(cursors[1]).toBe(delivered);
-    await expect(page.locator('#run-progress')).toHaveText('ツールを実行中');
+    await expect(page.locator('#run-progress')).toHaveText(label);
   } finally {
     await page.request.post(`/v1/runs/${sent.id}/cancel`, { headers: auth });
-    await expect.poll(async () => (await run(page, sent.id)).status).toBe('uncertain');
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe(stopped);
   }
+}
+
+test('the tool label survives an event stream reconnect', async ({ page }) => {
+  await labelSurvivesReconnect(page, '復旧テスト', 'ツールを実行中', 'uncertain');
+});
+
+test('a web search shows its label and the reply links its source', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const sent = await send(page, '検索テスト');
+  const pill = page.locator('#run-progress');
+  await expect(pill).toHaveText('Web を検索中');
+  await expect(pill).toHaveText('考えています');
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  await expect(pill).toBeHidden();
+  const source = assistantRows(page).last().getByRole('link', { name: '公式ニュース', exact: true });
+  await expect(source).toHaveAttribute('href', 'https://example.com/news');
+});
+
+test('a reload during a web search replays the same label', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const sent = await send(page, '検索停止テスト');
+  const pill = page.locator('#run-progress');
+  try {
+    await expect(pill).toHaveText('Web を検索中');
+    await page.reload();
+    await expectSignedIn(page);
+    // The reloaded page reads the stream from its first event.
+    await expect(pill).toHaveText('Web を検索中');
+  } finally {
+    await page.request.post(`/v1/runs/${sent.id}/cancel`, { headers: auth });
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe('cancelled');
+  }
+});
+
+test('the web search label survives a reconnect and Stop leaves nothing to review', async ({ page }) => {
+  await labelSurvivesReconnect(page, '検索停止テスト', 'Web を検索中', 'cancelled');
+  // A hosted search has no tool record: the stopped reply asks for no review
+  // and the conversation continues.
+  await expect(page.locator('#chat-log .message-status')).toHaveText(['停止しました']);
+  await composer(page).fill('続きをどうぞ');
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
 });
 
 test.describe('in UTC', () => {

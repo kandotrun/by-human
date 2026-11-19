@@ -150,16 +150,20 @@ async fn serve() -> anyhow::Result<()> {
                 status.plan_enabled,
                 "enable ChatGPT plan access with by-human login --enable-plan"
             );
-            let model = ChatGptModel::new(auth.clone(), config.model)?;
+            let model = ChatGptModel::new(auth.clone(), config.model, config.web_search)?;
             auth_manager = Some(auth);
             Arc::new(model)
         }
-        AuthMode::ApiKey => Arc::new(OpenAIProvider::new(ProviderConfig::new(
-            config.model,
-            config
-                .openai_api_key
-                .expect("validated explicit API-key mode"),
-        ))?),
+        AuthMode::ApiKey => {
+            let mut provider = ProviderConfig::new(
+                config.model,
+                config
+                    .openai_api_key
+                    .expect("validated explicit API-key mode"),
+            );
+            provider.web_search = config.web_search;
+            Arc::new(OpenAIProvider::new(provider)?)
+        }
     };
     let store = Store::connect(&config.database_url)
         .await

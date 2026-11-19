@@ -1,6 +1,7 @@
 #![cfg(feature = "postgres-tests")]
 
 use std::{
+    collections::VecDeque,
     str::FromStr,
     sync::{
         Arc, Mutex,
@@ -14,7 +15,8 @@ use by_human::{
     api::{ApiState, router},
     browser_session::{BrowserOrigins, SessionSecret, token_fingerprint},
     engine::{
-        Engine, EngineError, Limits, Model, ModelTurn, RuntimeEvent, RuntimeSink, ToolDefinition,
+        AuthMode, Engine, EngineError, Limits, Model, ModelTurn, OpenAIProvider, ProviderConfig,
+        RuntimeEvent, RuntimeSink, ToolDefinition,
     },
     runner::{Runner, RunnerHandle},
     store::{Run, RunStatus, Store},
@@ -202,6 +204,102 @@ impl Model for OversizedModel {
             usage: None,
         })
     }
+}
+
+/// A loopback stand-in for the Responses API. Each request takes the next
+/// script of stream events; a held script keeps its stream open until the
+/// client goes away.
+struct ScriptedResponses {
+    url: String,
+    task: JoinHandle<()>,
+}
+
+impl Drop for ScriptedResponses {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl ScriptedResponses {
+    async fn start(scripts: Vec<(Vec<Value>, bool)>) -> Self {
+        let scripts = Arc::new(Mutex::new(VecDeque::from(scripts)));
+        let app = axum::Router::new().route(
+            "/v1/responses",
+            axum::routing::post(move || {
+                let (events, held) = scripts.lock().unwrap().pop_front().unwrap_or_default();
+                async move {
+                    let body = async_stream::stream! {
+                        for event in events {
+                            yield Ok::<_, std::convert::Infallible>(format!("data: {event}\n\n"));
+                        }
+                        if held {
+                            std::future::pending::<()>().await;
+                        }
+                    };
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        axum::body::Body::from_stream(body),
+                    )
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self { url, task }
+    }
+
+    fn model(&self) -> Arc<dyn Model> {
+        let mut config = ProviderConfig::new("fixture-model".into(), "fixture-secret".into());
+        config.auth_mode = AuthMode::ChatGptPlan;
+        config.web_search = true;
+        Arc::new(OpenAIProvider::for_loopback_test(config, &self.url).unwrap())
+    }
+}
+
+/// A search that OpenAI has started and not finished.
+fn search_events(id: &str) -> Vec<Value> {
+    vec![
+        json!({"type":"response.output_item.added","output_index":0,
+            "item":{"type":"web_search_call","id":id,"status":"in_progress"}}),
+        json!({"type":"response.web_search_call.in_progress","output_index":0,"item_id":id}),
+        json!({"type":"response.web_search_call.searching","output_index":0,"item_id":id}),
+    ]
+}
+
+/// A completed answer, as a plan stream with an empty terminal output sends it.
+fn answer_events(index: usize, text: &str) -> Vec<Value> {
+    vec![
+        json!({"type":"response.output_text.delta","delta":text}),
+        json!({"type":"response.output_item.done","output_index":index,"item":{
+            "type":"message","id":"m_1","role":"assistant","status":"completed",
+            "content":[{"type":"output_text","text":text,"annotations":[]}]
+        }}),
+        json!({"type":"response.completed","response":{"status":"completed","output":[]}}),
+    ]
+}
+
+async fn tool_events(store: &Store, id: Uuid) -> Vec<(String, Value)> {
+    store
+        .list_events(id, 0, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind.starts_with("tool."))
+        .map(|event| (event.kind, event.payload))
+        .collect()
+}
+
+async fn search_started(store: &Store, id: Uuid) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while tool_events(store, id).await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the hosted search was not reported");
 }
 
 struct TestApp {
@@ -1632,5 +1730,145 @@ async fn the_web_app_manifest_and_icons_are_served() {
         180
     );
     app.shutdown().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_hosted_web_search_records_progress_and_no_tool_records() {
+    let db = Database::new().await;
+    let answer = "[公式ニュース](https://example.com/news) によると公開されました。";
+    let mut events = search_events("ws_1");
+    events.extend([
+        json!({"type":"response.web_search_call.completed","output_index":0,"item_id":"ws_1"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{
+            "type":"web_search_call","id":"ws_1","status":"completed",
+            "action":{"type":"search","query":"by-human"}
+        }}),
+    ]);
+    events.extend(answer_events(1, answer));
+    let responses = ScriptedResponses::start(vec![(events, false)]).await;
+    let app = TestApp::start(db.store.clone(), responses.model()).await;
+    let conversation = app.conversation("web search").await;
+    let run: Value = app
+        .send(conversation, "最新情報を調べて", "search")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let id: Uuid = run["id"].as_str().unwrap().parse().unwrap();
+    let finished = terminal(&db.store, id).await;
+    assert_eq!(finished.status, RunStatus::Completed);
+    assert_eq!(finished.output_text, answer);
+    assert!(db.store.list_tools(id).await.unwrap().is_empty());
+    assert_eq!(
+        tool_events(&db.store, id).await,
+        [
+            (
+                "tool.started".to_owned(),
+                json!({"call_id":"ws_1","name":"web_search"})
+            ),
+            ("tool.completed".to_owned(), json!({"call_id":"ws_1"})),
+        ]
+    );
+    // The page reads the same progress from the durable event stream.
+    let body = app
+        .client
+        .get(format!("{}/v1/runs/{id}/events", app.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(body.matches("event: tool.started").count(), 1);
+    assert!(body.contains(r#""name":"web_search""#));
+    assert_eq!(body.matches("event: tool.completed").count(), 1);
+    // The search item stays with the canonical items for the next turn.
+    assert_eq!(finished.output_items[0]["type"], "web_search_call");
+    app.shutdown().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn stop_or_a_lost_stream_during_a_hosted_search_is_never_uncertain() {
+    let db = Database::new().await;
+    let responses = ScriptedResponses::start(vec![
+        (search_events("ws_stop"), true),
+        (search_events("ws_lost"), false),
+        (answer_events(0, "続けられます。"), false),
+    ])
+    .await;
+    let app = TestApp::start(db.store.clone(), responses.model()).await;
+    let conversation = app.conversation("interrupted search").await;
+    let id = |run: Value| -> Uuid { run["id"].as_str().unwrap().parse().unwrap() };
+
+    let stopped = id(app
+        .send(conversation, "検索を止める", "stop")
+        .await
+        .json()
+        .await
+        .unwrap());
+    search_started(&db.store, stopped).await;
+    let cancel = app
+        .client
+        .post(format!("{}/v1/runs/{stopped}/cancel", app.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cancel.status(), StatusCode::OK);
+    let run = terminal(&db.store, stopped).await;
+    assert_eq!(run.status, RunStatus::Cancelled);
+    assert_eq!(run.error_code.as_deref(), Some("CANCELLED"));
+    assert!(db.store.list_tools(stopped).await.unwrap().is_empty());
+
+    // A stream that ends mid-search fails like any truncated response.
+    let lost = id(app
+        .send(conversation, "検索が途切れる", "lost")
+        .await
+        .json()
+        .await
+        .unwrap());
+    let run = terminal(&db.store, lost).await;
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_code.as_deref(), Some("PROVIDER_PROTOCOL_FAILED"));
+    assert!(db.store.list_tools(lost).await.unwrap().is_empty());
+    assert_eq!(
+        tool_events(&db.store, lost).await,
+        [(
+            "tool.started".to_owned(),
+            json!({"call_id":"ws_lost","name":"web_search"})
+        )]
+    );
+
+    // Neither outcome needs a review before the conversation continues.
+    let next = app.send(conversation, "続けて", "next").await;
+    assert_eq!(next.status(), StatusCode::ACCEPTED);
+    let run = terminal(&db.store, id(next.json().await.unwrap())).await;
+    assert_eq!(run.status, RunStatus::Completed);
+    app.shutdown().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn shutdown_during_a_hosted_search_cancels_it_instead_of_leaving_it_uncertain() {
+    let db = Database::new().await;
+    let responses = ScriptedResponses::start(vec![(search_events("ws_held"), true)]).await;
+    let app = TestApp::start(db.store.clone(), responses.model()).await;
+    let conversation = app.conversation("search at shutdown").await;
+    let run: Value = app
+        .send(conversation, "検索中に終了", "shutdown")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let id: Uuid = run["id"].as_str().unwrap().parse().unwrap();
+    search_started(&db.store, id).await;
+    // Shutdown settles the run before releasing the owner.
+    app.shutdown().await;
+    let run = db.store.get_run(id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Cancelled);
+    assert!(db.store.list_tools(id).await.unwrap().is_empty());
     db.cleanup().await;
 }

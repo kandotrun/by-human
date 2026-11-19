@@ -9,7 +9,7 @@ Sign in with your ChatGPT plan, keep every conversation in your own PostgreSQL,<
 and chat from a browser or your iPhone.
 
 by-human is a single Rust server that you run yourself.<br>
-It serves its own chat page, uses only its built-in clock and the tools you list, and when it can't tell
+It serves its own chat page, uses only its built-in clock, OpenAI's web search and the tools you list, and when it can't tell
 whether a tool finished, it stops and asks you instead of trying again.
 
 <sub>Being built to replace the OpenClaw features its owner uses every day. It stands alone: Pi's design is a reference, and running Pi, OpenClaw or Mukumo is not required.</sub>
@@ -52,7 +52,7 @@ whether a tool finished, it stops and asks you instead of trying again.
   <tr>
     <td align="center"><b>🔎 Find any conversation</b><br>Search, rename<br>and delete</td>
     <td align="center"><b>📱 On your iPhone</b><br>Add it to the Home Screen<br>through Tailscale</td>
-    <td align="center"><b>🧰 Tools you allow</b><br>The built-in clock, plus<br>the MCP tools you list</td>
+    <td align="center"><b>🧰 Tools you allow</b><br>The built-in clock, web search<br>and the MCP tools you list</td>
   </tr>
 </table>
 
@@ -66,7 +66,8 @@ whether a tool finished, it stops and asks you instead of trying again.
 - 🗄️ **Your history lives in your PostgreSQL** — Conversations, runs, events and tool receipts are stored in a database you own. To write a reply, by-human sends the conversation to OpenAI with `store: false`. Closing the page doesn't stop a run, the event stream picks up where it left off, and resending with the same key never starts a second run.
 - 💬 **A chat page that ships with the server** — Open `http://127.0.0.1:4310/` for streamed Markdown replies, Stop, search, rename and delete, in light or dark. There is no frontend build, no Node.js at runtime, and a browser sign-in ends after about 30 days without use, and lasts 400 days at most.
 - 📱 **On your iPhone, inside your tailnet** — Share the server with Tailscale Serve and add the page to your Home Screen. It opens full screen with its own icon, and the message box stays above the keyboard.
-- 🧰 **Only the MCP tools you list** — Besides the built-in clock, the model gets only the MCP tools you name, from servers you connect over stdio or Streamable HTTP. Unlisted tools are never offered to it, and by-human passes each MCP server only the environment variables or bearer token you name for it (a stdio server also inherits `PATH`).
+- 🌐 **Web search with linked sources** — OpenAI's hosted web search lets the model look up current or outside information and read web pages, and replies cite their sources as links. The search runs at OpenAI, so it leaves no tool record, and Stop during a search needs no review. It is on unless `BY_HUMAN_WEB_SEARCH=off`, and whether it works also depends on the model and on your account or workspace policy. With `BY_HUMAN_OPENAI_AUTH=api-key`, OpenAI bills each search as a tool call and its search content as tokens ([pricing](https://developers.openai.com/api/docs/pricing#built-in-tools)); `BY_HUMAN_WEB_SEARCH=off` avoids those charges. If every reply fails as soon as search is on, set `BY_HUMAN_WEB_SEARCH=off`; conversations that already searched keep working.
+- 🧰 **Only the MCP tools you list** — Besides the built-in clock and OpenAI's web search, the model gets only the MCP tools you name, from servers you connect over stdio or Streamable HTTP. Unlisted tools are never offered to it, and by-human passes each MCP server only the environment variables or bearer token you name for it (a stdio server also inherits `PATH`).
 - 🛟 **Unknown results wait for you** — When Stop, a crash or a timeout leaves a tool's result unknown, the run is marked `uncertain` and is never replayed. You look at what was recorded, leave a note, and then continue the conversation.
 - 🔒 **Secrets stay put** — The ChatGPT sign-in lives in an owner-only `~/.config/by-human` folder, the browser never sees it, and the page never stores the server token.
 
@@ -181,6 +182,10 @@ Each variable named in `env` must be set where by-human runs, or startup fails.
 HTTP servers use HTTPS (or loopback HTTP) and only the bearer token named in `bearer_token_env`.
 Details: [MCP tools](docs/mcp.md).
 
+> [!WARNING]
+> Pages the agent reads during a web search are untrusted. A page can steer the model into calling your MCP tools and putting what they return, or what you wrote in the conversation, into search queries, page addresses it opens or links in its reply.
+> If your MCP tools can read private data, set `BY_HUMAN_WEB_SEARCH=off`. OpenAI [recommends](https://developers.openai.com/api/docs/guides/tools-connectors-mcp#prompt-injection) keeping public web search and private lookups in separate requests.
+
 ## 🧭 How it works
 
 ```mermaid
@@ -222,6 +227,7 @@ The page shows the reply and the progress; reasoning and raw tool output never a
 | `OPENAI_API_KEY` | unset | Read only when `BY_HUMAN_OPENAI_AUTH=api-key` |
 | `BY_HUMAN_AUTH_DIR` | `~/.config/by-human` | The owner-only folder that holds the ChatGPT sign-in |
 | `BY_HUMAN_MCP_CONFIG` | unset, no MCP | The path to your MCP configuration |
+| `BY_HUMAN_WEB_SEARCH` | `on` | `on` offers OpenAI's hosted web search to the model; `off` turns it off |
 | `BY_HUMAN_PUBLIC_ORIGIN` | unset | One exact `https://` origin that proxies to the server, such as your Tailscale Serve address |
 
 | Command | What it does |
@@ -246,6 +252,7 @@ Run each one as `cargo run -p by-human -- <command>`.
 **Not established by automated tests:**
 
 - A real ChatGPT sign-in and a real reply. The OAuth and token checks run against local test servers.
+- A real web search at OpenAI. Search progress, citations and replay are checked with synthetic streams.
 - Safari on a real iPhone, and Tailscale Serve itself.
 - Feature parity with OpenClaw, or any performance gain.
 

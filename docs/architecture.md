@@ -22,6 +22,24 @@ not part of the integration scope. Shell execution, browser automation,
 scheduling, push notifications and the iOS adapter are later changes.
 No claim of feature parity or performance improvement is made by this first slice.
 
+OpenAI's hosted web search is offered beside those tools unless
+`BY_HUMAN_WEB_SEARCH=off`; for the ChatGPT plan it is a sibling of the `by_human`
+namespace, never inside it. The search runs at OpenAI within a model response,
+so nothing executes locally: it records no tool intent or receipt and never
+leaves an unknown tool outcome. Stop during a search ends the run as cancelled,
+and a lost stream ends it as failed. As during any model request, a server
+crash, the 120-second run deadline or a storage failure still leaves the
+running run uncertain. Its `web_search_call` items stay in the canonical
+output, except a malformed item without a usable ID, which is left out because
+it is not valid Responses input. While search is on they are replayed in later
+requests, as stateless Responses requests require. While it is off, requests
+leave them out:
+a request that replays a search without offering the tool can fail, which would
+stop a conversation that searched before. The model cites sources as Markdown
+links in its text, so `url_citation` annotations need no separate storage.
+Progress uses the same `tool.started` and `tool.completed` events as local
+tools, named `web_search`.
+
 ## State ownership
 
 PostgreSQL owns conversation input, run state, canonical model items, display
@@ -67,6 +85,8 @@ items, call IDs and tool outputs are preserved for subsequent model turns.
 
 Sources: [Responses tool flow](https://developers.openai.com/api/docs/guides/function-calling),
 [ChatGPT plan requirements](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations),
+[web search](https://developers.openai.com/api/docs/guides/tools-web-search),
+[stateless conversation state](https://developers.openai.com/api/docs/guides/conversation-state),
 [Pi Agent Core](https://github.com/earendil-works/pi/blob/main/packages/agent/README.md).
 
 ## Deployment boundary
