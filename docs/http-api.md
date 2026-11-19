@@ -15,8 +15,10 @@ endpoint or device pairing UI.
 | GET | `/v1/session` | Current credentials: `method` is `browser` or `bearer`, with the session's `expires_at` |
 | DELETE | `/v1/session` | End the current browser session |
 | POST | `/v1/conversations` | Create with `{}` for an automatic title or `{"title":"..."}` for an explicit title |
-| GET | `/v1/conversations` | Latest 100 conversations |
+| GET | `/v1/conversations` | 100 conversations with the latest activity |
 | GET | `/v1/conversations/{id}` | Conversation, latest chat messages and public run states |
+| PATCH | `/v1/conversations/{id}` | Rename with `{"title":"..."}` |
+| DELETE | `/v1/conversations/{id}` | Permanently delete the conversation and its records |
 | GET | `/v1/conversations/{id}/snapshot` | Browser view with a bounded window of public runs |
 | POST | `/v1/conversations/{id}/runs` | Submit `{"message":"...","idempotency_key":"..."}` |
 | GET | `/v1/runs/{id}` | Public run state and settled text |
@@ -35,6 +37,21 @@ message is accepted, the server saves a short title derived from that message
 in the same transaction. The submission response includes `conversation_title`
 on both acceptance and exact retry. Existing conversations and explicitly
 supplied titles retain their names.
+
+Conversations carry `last_activity_at`: the creation time, raised to each newly
+accepted run's `created_at`. Exact retries, Stop, finished replies, renames and
+reviews do not change it. The list is ordered by it, newest first.
+
+`PATCH` takes exactly `{"title":"..."}` (1 to 200 characters after trimming)
+and returns `200` with the conversation, `400` for an invalid title, `404` for
+a missing conversation or `422` for other fields. A manual title turns off the
+automatic title, whichever commits first.
+
+`DELETE` returns `204` after removing the conversation with its runs, events
+and tool records in one transaction. It returns `409` while the conversation
+has queued or running work or an unreviewed uncertain run, and `404` when the
+conversation does not exist. Deletion cannot be undone. Afterwards its runs
+and events return `404`.
 
 For SSE, preserve each integer `id` and reconnect to the **same run** with
 `Last-Event-ID`. Events are replayed from PostgreSQL; closing the stream does not
@@ -117,6 +134,8 @@ uncertain. This does not claim exactly-once execution of arbitrary external work
 送信時に作った`idempotency_key`は再試行でも再利用してください。
 同じキーで本文を変更すると`409`になります。
 SSEの接続を閉じても実行は止まりません。停止には`/cancel`を使います。
+会話は`PATCH`で名前を変更でき、`DELETE`で完全に削除できます。
+実行中または確認待ちの処理がある会話の削除は`409`になります。
 
 再起動時、処理中だった実行は結果未確認の`uncertain`として残し、自動再実行しません。
 実行記録を確認してメモと明示的な確認操作を残すと、同じ会話を続けられます。

@@ -136,10 +136,84 @@ that it has 32 to 512 printable characters.
 
 ## 3. Conversation organisation
 
-- Rename and delete from a per-conversation menu, with confirmation for delete.
-- Search titles and message text.
-- Order by last activity and group by 今日, 昨日, 過去 7 日間, then month.
-- The required API and migration are designed in that change.
+### Problem
+
+The sidebar lists the newest 100 conversations by creation time. The owner
+cannot rename or remove a conversation, cannot find an older one, and a long
+list has no landmarks. This track ships as two pull requests: 3a (activity
+order, date groups, rename and delete) and 3b (search).
+
+### Decisions
+
+- Delete is permanent, after a confirmation dialog (owner, 2026-11-18). It is
+  refused while the conversation has queued, running or unreviewed uncertain
+  work, the same condition that blocks a new message.
+- Activity means creating the conversation or accepting a new message. A
+  finished reply, a rename or a review does not reorder the list.
+- The list stays capped at 100. Search (3b) is the way to reach older ones.
+
+### HTTP contract (3a)
+
+| Route | Result |
+| --- | --- |
+| `GET /v1/conversations` | Ordered by `last_activity_at` (newest first, then `id`). Each item adds `last_activity_at`. |
+| `PATCH /v1/conversations/{id}` | `{"title":"..."}` (1–200 characters after trimming). `200` with the conversation; `400 invalid_input`; `404`; `422` for unknown fields. |
+| `DELETE /v1/conversations/{id}` | `204`; `404`; `409 conflict` while blocking work exists. |
+
+Cookie-authenticated `PATCH` and `DELETE` need an allowed `Origin`, like every
+other browser write.
+
+### Storage
+
+Migration `202611180004_conversation_activity.sql` adds
+`conversations.last_activity_at`, backfilled to the later of `created_at` and
+the newest run's `created_at`, and an index on `(last_activity_at DESC, id
+DESC)`. The values follow from that rule at all times:
+
+- `enqueue` raises `last_activity_at` to the new run's `created_at` inside its
+  locked transaction. An idempotent retry changes nothing.
+- A rename sets the title and clears `title_pending`. In either commit order
+  against the first message, the manual name wins: enqueue locks the row and
+  skips the automatic title once `title_pending` is false.
+- A delete runs in one transaction: lock the conversation (`404` if missing),
+  check blocking work with the predicate enqueue uses (`409`), then delete its
+  `run_events`, `tool_executions`, `runs` and the conversation. There is no
+  `ON DELETE CASCADE`, so a child table added later makes deletes fail loudly
+  rather than silently dropping receipts. Because enqueue takes the same lock
+  and delete refuses queued or running work, the runner never loses a run it
+  is executing.
+
+### Client
+
+- The sidebar groups rows as 今日, 昨日, 過去 7 日間, then by month (`11月`, or
+  `2025年12月` for another year), using the browser's local time.
+- Each row has a ⋯ button that opens a menu with 名前を変更 and 削除.
+- Rename opens a dialog with the current name. An empty name shows an error;
+  an unchanged one closes without a request, so automatic titling stays on.
+  Rename waits while a send to that conversation is in flight.
+- Delete opens a confirmation dialog that names the conversation and says
+  that this tab's draft and unsent text go with it. For the open conversation,
+  削除 is disabled while it is busy or needs review; otherwise the server's
+  `409` is shown in the dialog.
+- After a delete, the row, its draft and its pending text disappear, and an
+  open conversation returns to the empty state.
+- A `404` while loading, following a reply, renaming or deleting removes the
+  row and says the conversation was deleted. A `404` when sending marks the
+  message as not accepted, so its text can be returned to the composer.
+- An accepted message moves its conversation to the top. The list reloads
+  when the tab becomes visible again.
+- Escape closes only the topmost dialog or menu, not the drawer behind it.
+
+### Search (3b)
+
+- `GET /v1/conversations/search?q=` matches titles and message text with a
+  case-insensitive substring scan (`strpos(lower(...), lower($1))`), which
+  also works for one- or two-character Japanese queries. No extension or
+  index is needed at this size.
+- Results use the list order and carry a short snippet around the newest
+  match, rendered as text. The query runs with a statement timeout.
+- The sidebar search field debounces input and waits for IME composition to
+  end.
 
 ## 4. iPhone use
 

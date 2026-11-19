@@ -700,7 +700,7 @@ test('an offscreen title refresh finds a conversation outside the newest list wi
   const id = await createConversation();
   for (let index = 0; index < 99; index += 1) await createConversation();
   await connect(page);
-  await expect(page.locator('#conversation-list button')).toHaveCount(100);
+  await expect(page.locator('#conversation-list [data-conversation-id]')).toHaveCount(100);
   await conversationButton(page, id).click();
   await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
   await expect(composer(page)).toBeEnabled();
@@ -724,9 +724,14 @@ test('an offscreen title refresh finds a conversation outside the newest list wi
     await page.getByRole('button', { name: '送信', exact: true }).click();
     await sending;
     const created = await newConversation(page);
-    // The newly created conversation pushes the older one out of the server's newest 100.
-    const listed = await page.request.get('/v1/conversations', { headers: auth });
-    expect((await listed.json()).conversations.some(item => item.id === id)).toBeFalsy();
+    // Simulate the conversation falling outside the server's newest 100.
+    await page.route('**/v1/conversations', async route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const response = await route.fetch();
+      const body = await response.json();
+      body.conversations = body.conversations.filter(item => item.id !== id);
+      await route.fulfill({ response, json: body });
+    });
 
     releaseConflict();
     await expect(conversationButton(page, id)).toHaveText('停止テスト');
@@ -1189,5 +1194,462 @@ test('text and controls keep WCAG contrast in light and dark themes', async ({ p
   for (const colorScheme of ['light', 'dark']) {
     await page.emulateMedia({ colorScheme });
     expect.soft(await failures(), colorScheme).toEqual([]);
+  }
+});
+
+const menuButton = (page, id) => page.locator(`#conversation-list [data-menu-for="${id}"]`);
+const conversationMenu = page => page.locator('#conversation-menu');
+const renameDialog = page => page.getByRole('dialog', { name: '会話の名前を変更', exact: true });
+const deleteDialog = page => page.getByRole('dialog', { name: '会話を削除しますか？', exact: true });
+const firstListed = page => page.locator('#conversation-list [data-conversation-id]').first();
+
+async function createTitled(page, title) {
+  const response = await page.request.post('/v1/conversations', { headers: auth, data: { title } });
+  expect(response.status()).toBe(201);
+  return (await response.json()).id;
+}
+
+async function openMenu(page, id, item) {
+  await menuButton(page, id).click();
+  await expect(conversationMenu(page)).toBeVisible();
+  await conversationMenu(page).getByRole('button', { name: item, exact: true }).click();
+}
+
+test.describe('in Tokyo time', () => {
+  test.use({ timezoneId: 'Asia/Tokyo' });
+
+  test('the sidebar groups conversations by local date', async ({ page }) => {
+    await page.clock.setFixedTime(new Date('2026-11-18T12:00:00+09:00'));
+    const groups = [
+      ['今日', '2026-11-18T00:00:00+09:00'],
+      ['昨日', '2026-11-17T23:59:59+09:00'],
+      ['過去 7 日間', '2026-11-11T00:00:00+09:00'],
+      ['11月', '2026-11-10T23:59:59+09:00'],
+      ['10月', '2026-10-31T12:00:00+09:00'],
+      ['2025年12月', '2025-12-31T12:00:00+09:00'],
+    ];
+    const rows = [];
+    for (const [label, at] of groups) {
+      // Creation predates every group, so only the activity can place a row.
+      rows.push({ id: await createTitled(page, `${label}の会話`), title: `${label}の会話`, created_at: '2024-01-01T12:00:00+09:00', last_activity_at: at });
+    }
+    await page.route('**/v1/conversations', route => route.request().method() === 'GET'
+      ? route.fulfill({ json: { conversations: rows } })
+      : route.continue());
+    await connect(page);
+    await expect(page.locator('#conversation-list h2')).toHaveText(groups.map(([label]) => label));
+    for (const [label] of groups) {
+      const group = page.getByRole('list', { name: label, exact: true });
+      await expect(group.getByRole('button', { name: `${label}の会話`, exact: true })).toBeVisible();
+    }
+  });
+});
+
+test('sending moves a conversation to the top of the list', async ({ page }) => {
+  await connect(page);
+  const older = await newConversation(page);
+  const first = await send(page, '並び順テスト');
+  await expect.poll(async () => (await run(page, first.id)).status).toBe('completed');
+  const newer = await newConversation(page);
+  await expect(firstListed(page)).toHaveAttribute('data-conversation-id', newer);
+  await conversationButton(page, older).click();
+  await expect(composer(page)).toBeEnabled();
+  await send(page, 'もう一度');
+  await expect(firstListed(page)).toHaveAttribute('data-conversation-id', older);
+  await page.reload();
+  await expectSignedIn(page);
+  await expect(firstListed(page)).toHaveAttribute('data-conversation-id', older);
+});
+
+test('history that confirms a delayed send moves the conversation to the top', async ({ page }) => {
+  const id = await createTitled(page, '名前のある会話');
+  await connect(page);
+  const other = await newConversation(page);
+  await conversationButton(page, id).click();
+  await expect(composer(page)).toBeEnabled();
+  // A named conversation's history can read the conversation before the send
+  // commits and its runs after, so only the accepted run shows the activity.
+  const { last_activity_at: before } = (await conversation(page, id)).conversation;
+  await page.route(`**/v1/conversations/${id}/snapshot`, async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.conversation.last_activity_at = before;
+    await route.fulfill({ response, json: body });
+  });
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  const { promise: accepted, resolve: reportAccepted } = Promise.withResolvers();
+  await page.route(`**/v1/conversations/${id}/runs`, async route => {
+    const response = await route.fetch();
+    reportAccepted();
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
+    await composer(page).fill('履歴で受付を確認');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await accepted;
+    await expect(firstListed(page)).toHaveAttribute('data-conversation-id', other);
+    await conversationButton(page, other).click();
+    await conversationButton(page, id).click();
+    await expect(assistantRows(page)).toHaveText('こんにちは。「履歴で受付を確認」を受け取りました。');
+    await expect(firstListed(page)).toHaveAttribute('data-conversation-id', id);
+  } finally {
+    release();
+  }
+});
+
+test('a conversation can be renamed from its menu by keyboard', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const more = menuButton(page, id);
+  await expect(more).toHaveAccessibleName('「新しい会話」の操作');
+  await more.focus();
+  await page.keyboard.press('Enter');
+  const rename = conversationMenu(page).getByRole('button', { name: '名前を変更', exact: true });
+  await expect(rename).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(conversationMenu(page)).toBeHidden();
+  await expect(more).toBeFocused();
+
+  await page.keyboard.press('Enter');
+  await expect(rename).toBeFocused();
+  await page.keyboard.press('Enter');
+  const dialog = renameDialog(page);
+  const input = dialog.getByLabel('名前', { exact: true });
+  await expect(input).toHaveValue('新しい会話');
+  await expect(input).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(more).toBeFocused();
+
+  await openMenu(page, id, '名前を変更');
+  await input.fill('旅の計画');
+  await page.keyboard.press('Enter');
+  await expect(dialog).toBeHidden();
+  await expect(conversationButton(page, id)).toHaveText('旅の計画');
+  await expect(conversationTitle(page)).toHaveText('旅の計画');
+  await expect(more).toBeFocused();
+  await page.reload();
+  await expectSignedIn(page);
+  await expect(conversationButton(page, id)).toHaveText('旅の計画');
+  await conversationButton(page, id).click();
+  await expect(composer(page)).toBeEnabled();
+  const sent = await send(page, '自動の名前にならないメッセージ');
+  expect(sent.conversation_title).toBe('旅の計画');
+  await expect(conversationTitle(page)).toHaveText('旅の計画');
+});
+
+test('renaming checks the name and skips an unchanged one', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  let patches = 0;
+  page.on('request', request => { if (request.method() === 'PATCH') patches += 1; });
+  await openMenu(page, id, '名前を変更');
+  const dialog = renameDialog(page);
+  await dialog.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await openMenu(page, id, '名前を変更');
+  await dialog.getByLabel('名前', { exact: true }).fill('   ');
+  await dialog.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('名前を入力してください。');
+  await dialog.getByRole('button', { name: 'キャンセル', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(patches).toBe(0);
+  await expect(conversationButton(page, id)).toHaveText('新しい会話');
+});
+
+test('saving an untouched name keeps a title that arrived while renaming', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const path = `/v1/conversations/${id}/runs`;
+  const { promise: holdSend, resolve: releaseSend } = Promise.withResolvers();
+  await page.route(`**${path}`, async route => {
+    await holdSend;
+    await route.continue();
+  });
+  let patches = 0;
+  page.on('request', request => { if (request.method() === 'PATCH') patches += 1; });
+  try {
+    const sending = page.waitForRequest(request => request.url().endsWith(path));
+    await composer(page).fill('自動で付く名前');
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await sending;
+    await openMenu(page, id, '名前を変更');
+    const dialog = renameDialog(page);
+    await expect(dialog.getByLabel('名前', { exact: true })).toHaveValue('新しい会話');
+    releaseSend();
+    await expect(conversationButton(page, id)).toHaveText('自動で付く名前');
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(conversationButton(page, id)).toHaveText('自動で付く名前');
+    expect(patches).toBe(0);
+    expect((await conversation(page, id)).conversation.title).toBe('自動で付く名前');
+  } finally {
+    releaseSend();
+  }
+});
+
+test('deleting a conversation asks first and forgets it in this tab', async ({ page }) => {
+  await connect(page);
+  const keep = await newConversation(page);
+  const id = await newConversation(page);
+  await composer(page).fill('消える下書き');
+  await openMenu(page, id, '削除');
+  const dialog = deleteDialog(page);
+  await expect(dialog).toContainText('「新しい会話」');
+  await expect(dialog).toContainText('このタブの下書きと送信待ちのメッセージも削除されます。');
+  await expect(dialog.getByRole('button', { name: 'キャンセル', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(conversationButton(page, id)).toBeVisible();
+
+  await openMenu(page, id, '削除');
+  await dialog.getByRole('button', { name: '削除', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(conversationButton(page, id)).toHaveCount(0);
+  await expect(page.locator('#empty-state h2')).toHaveText('何から始めますか？');
+  await expect(conversationTitle(page)).toHaveText('会話');
+  await expect(conversationButton(page, keep)).toBeFocused();
+  const stored = await page.evaluate(() => sessionStorage.getItem('by-human-chat-v1'));
+  expect(stored).not.toContain(id);
+  expect(stored).not.toContain('消える下書き');
+  expect((await page.request.get(`/v1/conversations/${id}`, { headers: auth })).status()).toBe(404);
+});
+
+test('a busy conversation cannot be deleted', async ({ page }) => {
+  await connect(page);
+  const other = await newConversation(page);
+  const background = await page.request.post(`/v1/conversations/${other}/runs`, {
+    headers: auth,
+    data: { message: '停止テスト', idempotency_key: `delete-busy-other-${Date.now()}` },
+  });
+  expect(background.status()).toBe(202);
+  const id = await newConversation(page);
+  const sent = await send(page, '停止テスト');
+  try {
+    await openMenu(page, id, '削除');
+    const dialog = deleteDialog(page);
+    const busy = '実行中の処理か、確認が必要な実行結果があるため削除できません。';
+    await expect(dialog.getByRole('alert')).toHaveText(busy);
+    await expect(dialog.getByRole('button', { name: '削除', exact: true })).toBeDisabled();
+    await dialog.getByRole('button', { name: 'キャンセル', exact: true }).click();
+
+    await openMenu(page, other, '削除');
+    await expect(dialog.getByRole('button', { name: '削除', exact: true })).toBeEnabled();
+    await dialog.getByRole('button', { name: '削除', exact: true }).click();
+    await expect(dialog.getByRole('alert')).toHaveText(busy);
+    await dialog.getByRole('button', { name: 'キャンセル', exact: true }).click();
+    await expect(conversationButton(page, other)).toBeVisible();
+  } finally {
+    const { id: otherRun } = await background.json();
+    for (const runId of [sent.id, otherRun]) {
+      await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+      await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+    }
+  }
+});
+
+test('the delete dialog follows work that ends or starts while it is open', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const first = await send(page, '停止テスト');
+  await expect(assistantRows(page)).toHaveText('停止操作を待っています。');
+  await openMenu(page, id, '削除');
+  const dialog = deleteDialog(page);
+  const confirm = dialog.getByRole('button', { name: '削除', exact: true });
+  const busy = '実行中の処理か、確認が必要な実行結果があるため削除できません。';
+  await expect(confirm).toBeDisabled();
+  let second;
+  try {
+    await page.request.post(`/v1/runs/${first.id}/cancel`, { headers: auth });
+    await expect(confirm).toBeEnabled();
+    await expect(dialog.getByRole('alert')).toBeEmpty();
+    // Another client starts work before this tab asks to delete.
+    const started = await page.request.post(`/v1/conversations/${id}/runs`, {
+      headers: auth,
+      data: { message: '停止テスト', idempotency_key: `delete-dialog-${Date.now()}` },
+    });
+    expect(started.status()).toBe(202);
+    second = (await started.json()).id;
+    await confirm.click();
+    await expect(dialog.getByRole('alert')).toHaveText(busy);
+    await expect(confirm).toBeDisabled();
+    // The refreshed history follows that work, so its end answers the refusal.
+    await page.request.post(`/v1/runs/${second}/cancel`, { headers: auth });
+    await expect(confirm).toBeEnabled();
+    await expect(dialog.getByRole('alert')).toBeEmpty();
+  } finally {
+    for (const runId of [first.id, second]) {
+      if (!runId) continue;
+      await page.request.post(`/v1/runs/${runId}/cancel`, { headers: auth });
+      await expect.poll(async () => (await run(page, runId)).status).toBe('cancelled');
+    }
+  }
+});
+
+test('a conversation deleted elsewhere disappears when opened', async ({ page }) => {
+  await connect(page);
+  const gone = await newConversation(page);
+  await newConversation(page);
+  expect((await page.request.delete(`/v1/conversations/${gone}`, { headers: auth })).status()).toBe(204);
+  await conversationButton(page, gone).click();
+  await expect(conversationButton(page, gone)).toHaveCount(0);
+  await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
+});
+
+test('deleting a conversation already deleted elsewhere says so and focuses its neighbour', async ({ page }) => {
+  await connect(page);
+  const keep = await newConversation(page);
+  const gone = await newConversation(page);
+  expect((await page.request.delete(`/v1/conversations/${gone}`, { headers: auth })).status()).toBe(204);
+  await openMenu(page, gone, '削除');
+  const dialog = deleteDialog(page);
+  await dialog.getByRole('button', { name: '削除', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(conversationButton(page, gone)).toHaveCount(0);
+  await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
+  await expect(conversationButton(page, keep)).toBeFocused();
+});
+
+test('a message sent to a conversation deleted elsewhere can be returned', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  expect((await page.request.delete(`/v1/conversations/${id}`, { headers: auth })).status()).toBe(204);
+  await composer(page).fill('届かないメッセージ');
+  await page.getByRole('button', { name: '送信', exact: true }).click();
+  await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
+  await page.getByRole('button', { name: '入力欄に戻す', exact: true }).click();
+  await expect(composer(page)).toHaveValue('届かないメッセージ');
+});
+
+test('a reconnecting stream stops and forgets a conversation deleted elsewhere', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  let streams = 0;
+  const { promise: reconnecting, resolve: reportReconnect } = Promise.withResolvers();
+  const { promise: holdReconnect, resolve: releaseReconnect } = Promise.withResolvers();
+  await page.route(/\/v1\/runs\/[^/]+\/events$/, async route => {
+    streams += 1;
+    if (streams > 1) {
+      reportReconnect();
+      await holdReconnect;
+      return route.continue();
+    }
+    // The first stream ends after one event, so the client reconnects.
+    const response = await route.fetch();
+    const [first] = (await response.text()).split(/\r?\n\r?\n/).filter(event => /^id:/m.test(event));
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: `${first}\n\n` });
+  });
+  try {
+    const sent = await send(page, '別のタブで消される会話');
+    await reconnecting;
+    await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+    expect((await page.request.delete(`/v1/conversations/${id}`, { headers: auth })).status()).toBe(204);
+    releaseReconnect();
+    await expect(conversationButton(page, id)).toHaveCount(0);
+    await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
+    await expect(page.locator('#run-progress')).toBeHidden();
+    // A retry would follow within a second of the failed reconnect.
+    const retried = await page.waitForRequest(/\/v1\/runs\//, { timeout: 1_500 }).then(() => true, () => false);
+    expect(retried).toBe(false);
+    expect(streams).toBe(2);
+  } finally {
+    releaseReconnect();
+  }
+});
+
+test('the list reloads when the tab becomes visible again', async ({ page }) => {
+  await connect(page);
+  const created = await createTitled(page, '別のタブで作成');
+  await expect(conversationButton(page, created)).toHaveCount(0);
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect(conversationButton(page, created)).toHaveText('別のタブで作成');
+});
+
+test('a list reload during creation keeps one row for the new conversation', async ({ page }) => {
+  await connect(page);
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  const { promise: committed, resolve: reportCommitted } = Promise.withResolvers();
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const response = await route.fetch();
+    reportCommitted((await response.json()).id);
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
+    await newChat(page).click();
+    const id = await committed;
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await expect(conversationButton(page, id)).toHaveCount(1);
+    release();
+    await expect(conversationTitle(page)).toHaveText('新しい会話');
+    await expect(composer(page)).toBeFocused();
+    await expect(conversationButton(page, id)).toHaveCount(1);
+    await expect(conversationButton(page, id)).toHaveAttribute('aria-current', 'page');
+  } finally {
+    release();
+  }
+});
+
+test('a conversation deleted before its creation response arrives stays deleted', async ({ page }) => {
+  await connect(page);
+  const other = await newConversation(page);
+  await newConversation(page);
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  const { promise: committed, resolve: reportCommitted } = Promise.withResolvers();
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const response = await route.fetch();
+    reportCommitted((await response.json()).id);
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
+    await newChat(page).click();
+    const id = await committed;
+    await conversationButton(page, other).click();
+    await expect(composer(page)).toBeEnabled();
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await expect(conversationButton(page, id)).toHaveCount(1);
+    await openMenu(page, id, '削除');
+    await deleteDialog(page).getByRole('button', { name: '削除', exact: true }).click();
+    await expect(deleteDialog(page)).toBeHidden();
+    await expect(conversationButton(page, id)).toHaveCount(0);
+    release();
+    // New Chat turns on again once the creation response has been handled.
+    await expect(newChat(page)).toBeEnabled();
+    await expect(conversationButton(page, id)).toHaveCount(0);
+    await expect(conversationButton(page, other)).toHaveAttribute('aria-current', 'page');
+  } finally {
+    release();
+  }
+});
+
+test('a conversation created before an accepted send is listed below it', async ({ page }) => {
+  await connect(page);
+  const id = await newConversation(page);
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  const { promise: committed, resolve: reportCommitted } = Promise.withResolvers();
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const response = await route.fetch();
+    reportCommitted((await response.json()).id);
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
+    await newChat(page).click();
+    const created = await committed;
+    await send(page, '作成中に送信');
+    // The send's own response has moved its row, with its first-message title.
+    await expect(conversationButton(page, id)).toHaveText('作成中に送信');
+    release();
+    await expect(conversationButton(page, created)).toHaveAttribute('aria-current', 'page');
+    const rows = page.locator('#conversation-list [data-conversation-id]');
+    await expect(rows.nth(0)).toHaveAttribute('data-conversation-id', id);
+    await expect(rows.nth(1)).toHaveAttribute('data-conversation-id', created);
+  } finally {
+    release();
   }
 });

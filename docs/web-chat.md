@@ -36,6 +36,20 @@ typing dots fill the gap before the first token. A time label opens each
 conversation and marks gaps of 30 minutes or a new day. When you scroll up, a
 button returns to the latest reply. The layout follows the system light or dark
 theme.
+
+The sidebar lists conversations by their latest activity (creation or an
+accepted message) under 今日, 昨日, 過去 7 日間 and then month headings, in the
+browser's local time. It reloads when the tab becomes visible again. Each row's
+⋯ menu offers **名前を変更** and **削除**. A manual name replaces the automatic
+title and is kept when the first message arrives. **削除** asks first and then
+permanently removes the conversation's messages, run records and review notes,
+with this tab's draft and unsent text for it; it cannot be undone. A
+conversation with queued or running work, or an uncertain result that has not
+been reviewed, cannot be deleted. A conversation deleted in another tab or
+browser disappears when it is next opened or its reply stream reconnects, and a
+message sent to it is marked as not accepted so its text can be returned to the
+composer.
+
 The browser loads the latest 100 runs that fit in an 8 MiB response. It marks
 omitted history at the top of the conversation. Older runs remain stored on the
 server. Paging remains outside this slice.
@@ -87,6 +101,11 @@ not an independent verification of external effects or a per-tool approval syste
 65,536文字を超える長い返信は、Markdownにせずそのまま文字で表示します。
 応答中はタイトルの下に「考えています」「時刻を確認中」「応答中」などの状態を表示し、
 画面はシステムのライト／ダーク設定に合わせます。
+
+会話一覧は最後のやり取りが新しい順に並び、「今日」「昨日」「過去 7 日間」と月ごとに
+まとめて表示します。各会話の「⋯」から名前の変更と削除ができます。
+削除は確認のあとに会話・実行記録・確認メモを完全に消し、元に戻せません。
+実行中の処理や確認待ちの結果がある会話は削除できません。
 
 下書きと送信結果の確認待ちは、このタブのsessionStorageに保存します。
 送信結果が不明なときは、同じ送信IDで確認し、新しいIDで送り直しません。
