@@ -85,6 +85,25 @@ test('GFM tables scroll and keep column alignment', async ({ page }) => {
   expect(await html(page, 'a | b\n--- | ---\n1 | 2\n\n後')).toBe(
     '<div class="table-scroll"><table><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table></div><p>後</p>');
   expect(await html(page, '| 表ではない |\n| 区切りなし |')).toBe('<p>| 表ではない |<br>| 区切りなし |</p>');
+  // After an escaped backslash the trailing pipe is a delimiter; an escaped pipe stays in the cell.
+  expect(await html(page, '| a \\\\|\n|---|\n\n| b \\|\n|---|')).toBe(
+    '<div class="table-scroll"><table><thead><tr><th>a \\</th></tr></thead></table></div>' +
+    '<div class="table-scroll"><table><thead><tr><th>b |</th></tr></thead></table></div>');
+});
+
+test('tables in one reply share one cell budget', async ({ page }) => {
+  // Each table pads 39 one-cell rows to 100 columns: 4,000 cells, 16,000 in all.
+  const table = '|' + 'a|'.repeat(100) + '\n|' + '-|'.repeat(100) + '\n' + '|\n'.repeat(39);
+  const result = await page.evaluate(text => {
+    const host = document.createElement('div');
+    host.append(window.markdown.renderMarkdown(text));
+    return {
+      cells: [...host.querySelectorAll('table')].map(table => table.querySelectorAll('th, td').length),
+      paragraphs: host.querySelectorAll(':scope > p').length,
+    };
+  }, Array(4).fill(table).join('\n'));
+  // Tables render as before until 10,000 cells are used; the rest is text.
+  expect(result).toEqual({ cells: [4_000, 4_000, 2_000], paragraphs: 2 });
 });
 
 test('links allow only web and mail addresses', async ({ page }) => {
@@ -96,6 +115,8 @@ test('links allow only web and mail addresses', async ({ page }) => {
     `<p>${link('mailto:me@example.com', 'メール')} と ${link('http://example.com', '<strong>強調</strong>リンク')}</p>`);
   expect(await html(page, '![図](https://example.com/a.png)')).toBe(`<p>${link('https://example.com/a.png', '図')}</p>`);
   expect(await html(page, '[相対](/v1/session) と [危険](javascript:alert(1)) と ![x](data:image/png;base64,AAAA)')).toBe('<p>相対 と 危険 と x</p>');
+  // Without "//" the page would resolve the address as a path on its own origin.
+  expect(await html(page, '[例](http:example.com) と <https:example.com>')).toBe('<p>例 と &lt;https:example.com&gt;</p>');
 });
 
 test('code paths, fences in lists, URLs in emphasis and table escapes', async ({ page }) => {
@@ -136,6 +157,11 @@ test('code paths, fences in lists, URLs in emphasis and table escapes', async ({
   // In a nested item the same line is two spaces into the item's content, so it is a quote.
   expect(await html(page, '- - | a |\n    | - |\n      > x\nlazy')).toBe(
     '<ul><li><ul><li><div class="table-scroll"><table><thead><tr><th>a</th></tr></thead></table></div><blockquote><p>x</p></blockquote>lazy</li></ul></li></ul>');
+  // A delimiter row with another column count is no table, so the paragraph continues lazily.
+  expect(await html(page, '- a | b\n  | --- |\ncontinued')).toBe('<ul><li>a | b<br>| --- |<br>continued</li></ul>');
+  // A quoted rule ends the paragraph like an unwrapped one; a quoted paragraph still continues.
+  expect(await html(page, '- > x\n  > ---\nOutside')).toBe('<ul><li><blockquote><p>x</p><hr></blockquote></li></ul><p>Outside</p>');
+  expect(await html(page, '- > x\ncontinued')).toBe('<ul><li><blockquote><p>x</p></blockquote>continued</li></ul>');
 });
 
 test('hostile input never creates active content', async ({ page }) => {
@@ -214,6 +240,7 @@ test('pathological replies render quickly', async ({ page }) => {
       mixedDelimiters: '_a '.repeat(60_000) + '*b*'.repeat(60_000),
       deepEmphasis: '*a '.repeat(70) + 'x '.repeat(300_000) + ' a*'.repeat(70),
       wideHeader: '|' + 'a|'.repeat(10_001) + '\n|' + '-|'.repeat(10_001),
+      paddedTables: ('|' + 'a|'.repeat(100) + '\n|' + '-|'.repeat(100) + '\n' + '|\n'.repeat(99) + '\n').repeat(1_000),
       sameDelimiter: '*a '.repeat(40_000) + 'a**b '.repeat(40_000),
       longRuns: '*'.repeat(400_000) + 'x' + '*'.repeat(400_000),
       angleLinks: '[a](<'.repeat(30_000),

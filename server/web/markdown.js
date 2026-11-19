@@ -5,7 +5,8 @@
 
 const MAX_BLOCK_DEPTH = 16;
 const MAX_INLINE_DEPTH = 64;
-// Padding short rows to the header width must not amplify a small reply.
+// Padding short rows to the header width must not amplify a small reply, so
+// all tables in one reply share this many cells.
 const MAX_TABLE_CELLS = 10_000;
 const MAX_DESTINATION = 2_048;
 const ALLOWED_SCHEMES = new Set(["http", "https", "mailto"]);
@@ -30,7 +31,7 @@ const URL_TRAILING = new Set([..."?!.,:;*_~'\")]}"]);
 export function renderMarkdown(source, doc = document) {
   const lines = String(source ?? "").replace(/\r\n?/g, "\n").split("\n");
   const fragment = doc.createDocumentFragment();
-  for (const block of parseBlocks(lines, 0)) fragment.append(renderBlock(block, doc));
+  for (const block of parseBlocks(lines, 0, { cells: MAX_TABLE_CELLS })) fragment.append(renderBlock(block, doc));
   return fragment;
 }
 
@@ -104,7 +105,6 @@ function startsBlock(line, depth) {
 function splitRow(line) {
   let text = trimLine(line);
   if (text.startsWith("|")) text = text.slice(1);
-  if (text.endsWith("|") && !text.endsWith("\\|")) text = text.slice(0, -1);
   const cells = [];
   let start = 0;
   for (let index = 0; index < text.length; index += 1) {
@@ -114,7 +114,8 @@ function splitRow(line) {
       start = index + 1;
     }
   }
-  cells.push(trimLine(text.slice(start)));
+  // A trailing pipe the scan read as a delimiter closes the last cell.
+  if (start < text.length || !cells.length) cells.push(trimLine(text.slice(start)));
   return cells.map((cell) => cell.replace(/\\\|/g, "|"));
 }
 
@@ -132,7 +133,7 @@ function delimiterRow(line) {
   return align;
 }
 
-function parseBlocks(lines, depth) {
+function parseBlocks(lines, depth, budget) {
   const blocks = [];
   let paragraph = null;
   const flush = () => {
@@ -187,30 +188,30 @@ function parseBlocks(lines, depth) {
         inner.push(quoted[1]);
         index += 1;
       }
-      blocks.push({ type: "quote", children: parseBlocks(inner, depth + 1) });
+      blocks.push({ type: "quote", children: parseBlocks(inner, depth + 1, budget) });
       continue;
     }
     const item = depth < MAX_BLOCK_DEPTH ? matchItem(line) : null;
     // An ordered list interrupts a paragraph only when it starts at 1.
     if (item && !(paragraph && item.ordered && item.start !== 1)) {
       flush();
-      const list = parseList(lines, index, item, depth);
+      const list = parseList(lines, index, item, depth, budget);
       blocks.push(list.block);
       index = list.next;
       continue;
     }
     const align = line.includes("|") && index + 1 < lines.length ? delimiterRow(lines[index + 1]) : null;
     const head = align ? splitRow(line) : null;
-    if (head && head.length === align.length && head.length <= MAX_TABLE_CELLS) {
+    if (head && head.length === align.length && head.length <= budget.cells) {
       flush();
       const rows = [];
       let next = index + 2;
-      let total = head.length;
-      // Rows beyond the cell budget continue as ordinary text.
-      while (next < lines.length && !isBlank(lines[next]) && !startsBlock(lines[next], depth) && total + head.length <= MAX_TABLE_CELLS) {
+      budget.cells -= head.length;
+      // Rows beyond the reply's cell budget continue as ordinary text.
+      while (next < lines.length && !isBlank(lines[next]) && !startsBlock(lines[next], depth) && head.length <= budget.cells) {
         const cells = splitRow(lines[next]);
         rows.push(Array.from(head, (_, column) => cells[column] ?? ""));
-        total += head.length;
+        budget.cells -= head.length;
         next += 1;
       }
       blocks.push({ type: "table", align, head, rows });
@@ -224,7 +225,7 @@ function parseBlocks(lines, depth) {
   return blocks;
 }
 
-function parseList(lines, start, first, depth) {
+function parseList(lines, start, first, depth, budget) {
   const items = [];
   let loose = false;
   let index = start;
@@ -289,13 +290,15 @@ function parseList(lines, start, first, depth) {
         fenceQuotes = quotes;
         tableOpen = false;
         paragraphOpen = false;
-      } else if (inner === "") {
+      } else if (inner === "" || isThematicBreak(inner)) {
+        // A rule inside a quote or nested item ends blocks like an unwrapped one.
         tableOpen = false;
         paragraphOpen = false;
       } else if (row) {
         // Table rows continue without pipes.
         paragraphOpen = false;
-      } else if (previous.includes("|") && delimiterRow(inner)) {
+      } else if (previous.includes("|") && delimiterRow(inner)?.length === splitRow(previous).length) {
+        // As in parseBlocks, the delimiter row must match the header's columns.
         tableOpen = true;
         tableQuotes = quotes;
         paragraphOpen = false;
@@ -325,7 +328,7 @@ function parseList(lines, start, first, depth) {
     }
     while (body.length > 1 && isBlank(body[body.length - 1])) body.pop();
     if (body.some(isBlank)) loose = true;
-    const children = parseBlocks(body, depth + 1);
+    const children = parseBlocks(body, depth + 1, budget);
     let task = null;
     const lead = children[0];
     const checkbox = lead?.type === "paragraph" ? TASK.exec(lead.text) : null;
@@ -443,7 +446,9 @@ function safeHref(raw) {
   if (!scheme || !ALLOWED_SCHEMES.has(scheme[1].toLowerCase())) return null;
   try {
     const url = new URL(value);
-    if (url.protocol !== "mailto:" && !url.hostname) return null;
+    // A browser resolves "http:example.com" as a path on the page's own origin,
+    // so a web address needs "//" right after its scheme.
+    if (url.protocol !== "mailto:" && (!url.hostname || !value.startsWith("//", scheme[0].length))) return null;
   } catch {
     return null;
   }
