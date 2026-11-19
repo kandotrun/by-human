@@ -81,6 +81,10 @@ pub enum RuntimeEvent {
     TextDelta { delta: String },
     ToolStarted { call_id: String, name: String },
     ToolCompleted { call_id: String, name: String },
+    // Progress of a tool that runs at the provider, such as web search.
+    // Nothing runs locally, so it has no intent, receipt or unknown outcome.
+    HostedToolStarted { call_id: String, name: String },
+    HostedToolCompleted { call_id: String, name: String },
     ModelStarted { request: usize },
 }
 

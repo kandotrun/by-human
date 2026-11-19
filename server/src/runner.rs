@@ -372,6 +372,14 @@ impl RuntimeSink for DurableSink {
             // The intent/receipt transactions already emit authoritative tool
             // progress. Do not create a second UI row for the same operation.
             RuntimeEvent::ToolStarted { .. } | RuntimeEvent::ToolCompleted { .. } => return Ok(()),
+            // A hosted tool runs at the provider. With no intent or receipt to
+            // carry it, its progress is recorded as the same display events.
+            RuntimeEvent::HostedToolStarted { call_id, name } => {
+                ("tool.started", json!({"call_id":call_id,"name":name}))
+            }
+            RuntimeEvent::HostedToolCompleted { call_id, .. } => {
+                ("tool.completed", json!({"call_id":call_id}))
+            }
             RuntimeEvent::ModelStarted { request } => ("model_started", json!({"request":request})),
         };
         self.store

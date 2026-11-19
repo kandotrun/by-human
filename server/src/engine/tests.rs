@@ -1189,3 +1189,155 @@ async fn other_hosted_items_and_a_search_without_an_answer_are_refused() {
         assert_eq!(sink.before.load(Ordering::SeqCst), 0);
     }
 }
+
+/// The stream of a search that OpenAI has started but not finished.
+fn search_progress(id: &str) -> Vec<Vec<u8>> {
+    vec![
+        frame(json!({"type":"response.output_item.added","output_index":0,
+            "item":{"type":"web_search_call","id":id,"status":"in_progress"}})),
+        frame(
+            json!({"type":"response.web_search_call.in_progress","output_index":0,
+            "item_id":id,"sequence_number":1}),
+        ),
+        frame(
+            json!({"type":"response.web_search_call.searching","output_index":0,
+            "item_id":id,"sequence_number":2}),
+        ),
+    ]
+}
+
+fn hosted_search(started: bool, id: &str) -> RuntimeEvent {
+    let (call_id, name) = (id.to_owned(), "web_search".to_owned());
+    if started {
+        RuntimeEvent::HostedToolStarted { call_id, name }
+    } else {
+        RuntimeEvent::HostedToolCompleted { call_id, name }
+    }
+}
+
+fn search_started(sink: &Sink) -> bool {
+    sink.events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::HostedToolStarted { .. }))
+}
+
+#[tokio::test]
+async fn hosted_search_progress_is_reported_once_without_a_tool_intent() {
+    let item = |index: usize, kind: &str, item: Value| {
+        frame(
+            json!({"type":format!("response.output_item.{kind}"),"output_index":index,"item":item}),
+        )
+    };
+    let mut chunks = search_progress("ws_1");
+    chunks.extend([
+        frame(
+            json!({"type":"response.web_search_call.completed","output_index":0,
+            "item_id":"ws_1","sequence_number":3}),
+        ),
+        item(0, "done", web_search("ws_1")),
+        // A search can also be reported by its output item alone.
+        item(
+            1,
+            "added",
+            json!({"type":"web_search_call","id":"ws_2","status":"in_progress"}),
+        ),
+        item(1, "done", web_search("ws_2")),
+        frame(json!({"type":"response.output_text.delta","delta":CITED})),
+        item(2, "done", cited_message(CITED)),
+        complete(vec![]),
+    ]);
+    let fixture = Fixture::start(vec![chunks]).await;
+    let sink = Sink::default();
+    let result = Engine::new(
+        Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
+        Limits::default(),
+    )
+    .run(input(), &sink, CancellationToken::new())
+    .await
+    .unwrap();
+    assert_eq!(result.text, CITED);
+    assert_eq!(
+        *sink.events.lock().unwrap(),
+        [
+            RuntimeEvent::ModelStarted { request: 1 },
+            hosted_search(true, "ws_1"),
+            hosted_search(false, "ws_1"),
+            hosted_search(true, "ws_2"),
+            hosted_search(false, "ws_2"),
+            RuntimeEvent::TextDelta {
+                delta: CITED.into()
+            },
+        ]
+    );
+    assert_eq!(sink.before.load(Ordering::SeqCst), 0);
+    assert_eq!(sink.after.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn hosted_search_progress_needs_a_bounded_item_id() {
+    for progress in [
+        json!({"type":"response.web_search_call.searching","output_index":0}),
+        json!({"type":"response.web_search_call.searching","output_index":0,"item_id":""}),
+        json!({"type":"response.web_search_call.in_progress","output_index":0,
+            "item_id":"x".repeat(257)}),
+        json!({"type":"response.output_item.added","output_index":0,
+            "item":{"type":"web_search_call","status":"in_progress"}}),
+    ] {
+        let fixture = Fixture::start(vec![vec![
+            frame(progress),
+            complete(vec![web_search("ws_1"), cited_message(CITED)]),
+        ]])
+        .await;
+        let sink = Sink::default();
+        let error = Engine::new(
+            Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
+            Limits::default(),
+        )
+        .run(input(), &sink, CancellationToken::new())
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, EngineErrorKind::Protocol);
+        assert!(!search_started(&sink));
+    }
+}
+
+#[tokio::test]
+async fn a_search_cut_short_fails_and_a_stopped_search_is_cancelled() {
+    // Nothing ran locally, so neither outcome is a persistence uncertainty.
+    let fixture = Fixture::start(vec![search_progress("ws_1")]).await;
+    let sink = Sink::default();
+    let error = Engine::new(
+        Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
+        Limits::default(),
+    )
+    .run(input(), &sink, CancellationToken::new())
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind, EngineErrorKind::Protocol);
+    assert!(search_started(&sink));
+    assert_eq!(sink.before.load(Ordering::SeqCst), 0);
+
+    let fixture = Fixture::with_options(vec![search_progress("ws_1")], StatusCode::OK, true).await;
+    let sink = Sink::default();
+    let token = CancellationToken::new();
+    let engine = Engine::new(
+        Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
+        Limits::default(),
+    );
+    let run = engine.run(input(), &sink, token.clone());
+    let stop = async {
+        while !search_started(&sink) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        token.cancel();
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(run, stop) })
+            .await
+            .unwrap();
+    assert_eq!(result.unwrap_err().kind, EngineErrorKind::Cancelled);
+    assert_eq!(sink.before.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
+}

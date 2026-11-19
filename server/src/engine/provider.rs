@@ -3,8 +3,13 @@
 //! Protocol sources:
 //! https://developers.openai.com/api/docs/guides/function-calling
 //! https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
+//! https://developers.openai.com/api/reference/resources/responses/streaming-events
 
-use std::{collections::BTreeMap, net::IpAddr, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    net::IpAddr,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -17,6 +22,9 @@ use super::{
     EngineError, EngineErrorKind, Model, ModelTurn, Result, RuntimeEvent, RuntimeSink,
     ToolDefinition, checkpoint, protocol_error, sse::Decoder,
 };
+
+/// The tool name that run events report for OpenAI's hosted web search.
+const WEB_SEARCH: &str = "web_search";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -209,6 +217,7 @@ impl OpenAIProvider {
         let mut stream = response.bytes_stream();
         let mut decoder = Decoder::default();
         let mut completed_items = BTreeMap::new();
+        let mut searches = HostedSearches::default();
         let mut received = 0usize;
         loop {
             let bytes = tokio::select! {
@@ -248,9 +257,25 @@ impl OpenAIProvider {
                             .filter(|item| item.is_object())
                             .cloned()
                             .ok_or_else(protocol_error)?;
+                        let finished = if item["type"] == "web_search_call" {
+                            searches.complete(&item["id"])?
+                        } else {
+                            None
+                        };
                         if completed_items.insert(index, item).is_some() {
                             return Err(protocol_error());
                         }
+                        report(sink, cancel, finished).await?;
+                    }
+                    "response.output_item.added" if value["item"]["type"] == "web_search_call" => {
+                        report(sink, cancel, searches.start(&value["item"]["id"])?).await?;
+                    }
+                    "response.web_search_call.in_progress"
+                    | "response.web_search_call.searching" => {
+                        report(sink, cancel, searches.start(&value["item_id"])?).await?;
+                    }
+                    "response.web_search_call.completed" => {
+                        report(sink, cancel, searches.complete(&value["item_id"])?).await?;
                     }
                     "response.output_text.delta" | "response.refusal.delta" => {
                         let delta = value["delta"].as_str().ok_or_else(protocol_error)?;
@@ -300,6 +325,62 @@ impl OpenAIProvider {
             }
         }
     }
+}
+
+/// Progress of OpenAI-hosted web searches within one response. The search
+/// runs at OpenAI, so these events describe it and authorize nothing.
+#[derive(Default)]
+struct HostedSearches {
+    started: HashSet<String>,
+    completed: HashSet<String>,
+}
+
+impl HostedSearches {
+    /// Report a search once, from whichever stream event shows it first.
+    fn start(&mut self, id: &Value) -> Result<Option<RuntimeEvent>> {
+        let id = hosted_item_id(id)?;
+        Ok(self
+            .started
+            .insert(id.clone())
+            .then(|| RuntimeEvent::HostedToolStarted {
+                call_id: id,
+                name: WEB_SEARCH.into(),
+            }))
+    }
+
+    /// End a started search once; its completed event and item both end it.
+    fn complete(&mut self, id: &Value) -> Result<Option<RuntimeEvent>> {
+        let id = hosted_item_id(id)?;
+        Ok(
+            (self.started.contains(&id) && self.completed.insert(id.clone())).then(|| {
+                RuntimeEvent::HostedToolCompleted {
+                    call_id: id,
+                    name: WEB_SEARCH.into(),
+                }
+            }),
+        )
+    }
+}
+
+/// Progress is stored as a run event, so its item ID is bounded like a call ID.
+fn hosted_item_id(value: &Value) -> Result<String> {
+    value
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 256)
+        .map(str::to_owned)
+        .ok_or_else(protocol_error)
+}
+
+async fn report(
+    sink: &dyn RuntimeSink,
+    cancel: &CancellationToken,
+    event: Option<RuntimeEvent>,
+) -> Result<()> {
+    if let Some(event) = event {
+        checkpoint(sink, cancel).await?;
+        sink.emit(event).await?;
+    }
+    Ok(())
 }
 
 #[async_trait]
