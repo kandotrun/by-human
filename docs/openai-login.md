@@ -55,7 +55,11 @@ ChatGPT-plan requests go to the public Responses API, use streaming and
 Functions are namespaced and unsupported generation parameters are omitted.
 The initial built-in function only reads the current UTC time.
 
-Hosted OpenAI tools such as remote MCP, computer use, file search and audio
+OpenAI's hosted web search is offered as a top-level tool beside the `by_human`
+namespace unless `BY_HUMAN_WEB_SEARCH=off`. It remains subject to model and
+account/workspace policy
+([inference limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)).
+Other hosted OpenAI tools such as remote MCP, computer use, file search and audio
 transcription are not enabled by this route. Future by-human tools can implement
 local MCP/browser connectors through its own execution and permission layer.
 
@@ -72,6 +76,9 @@ from OpenClaw.
 認証情報は既定で`~/.config/by-human`に保存します。他アプリのトークンは読みません。
 プラン利用を許可しなかった場合は、`login --enable-plan`で同じ登録のまま再同意できます。
 `auth-status`では秘密値や個人情報を出さず、利用準備の状態だけを確認できます。
+`BY_HUMAN_WEB_SEARCH=off`にしない限り、OpenAIのWeb検索を`by_human`の名前空間と並ぶ
+トップレベルのツールとして提供します。使えるかどうかは、モデルやアカウント／
+ワークスペースのポリシーにもよります。
 ローカル試験と、実アカウントでのログイン・応答確認は別の検証として扱います。
 
 Sources:
