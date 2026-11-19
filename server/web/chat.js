@@ -305,7 +305,8 @@ async function runSearch() {
   try {
     const result = await api(`/conversations/search?q=${encodeURIComponent(query)}`);
     if (request !== searchRequest || capturedConnection !== connection) return;
-    searchResults = result.conversations.filter((item) => UUID.test(item.id));
+    // An answer can predate a deletion this tab has already confirmed.
+    searchResults = result.conversations.filter((item) => UUID.test(item.id) && !forgotten.has(item.id));
     searchTruncated = Boolean(result.truncated);
     searchFailed = false;
   } catch (error) {
@@ -511,8 +512,17 @@ function forgetConversation(id, notice = false) {
 // Keeps the list in activity order after an accepted message.
 function touchConversation(id, at) {
   const index = conversations.findIndex((item) => item.id === id);
+  if (index < 0) {
+    // A conversation found only by search joins the list once it has newer activity.
+    const found = searchResults?.find((item) => item.id === id);
+    if (!found || typeof at !== "string" || Date.parse(found.last_activity_at) >= Date.parse(at)) return;
+    const { match, ...conversation } = found;
+    insertByActivity({ ...conversation, last_activity_at: at });
+    listGeneration += 1;
+    return;
+  }
   // Nothing moves, so a list response already in flight stays valid.
-  if (index < 0 || typeof at !== "string" || Date.parse(conversations[index].last_activity_at) >= Date.parse(at)) return;
+  if (typeof at !== "string" || Date.parse(conversations[index].last_activity_at) >= Date.parse(at)) return;
   const [conversation] = conversations.splice(index, 1);
   conversation.last_activity_at = at;
   insertByActivity(conversation);

@@ -1903,3 +1903,54 @@ test('Escape during Japanese conversion in the search field keeps the drawer ope
   await expect(list).toBeVisible();
   await expect(searchBox(page)).toHaveValue('にほんご');
 });
+
+test('a conversation found only by search joins the list when it gets a new message', async ({ page }) => {
+  const suffix = Date.now().toString(36);
+  const title = `一覧の外${suffix}`;
+  const id = await createTitled(page, title);
+  // The list leaves it out, as if it were older than the newest 100.
+  await page.route('**/v1/conversations', async route => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    const body = await response.json();
+    body.conversations = body.conversations.filter(item => item.id !== id);
+    await route.fulfill({ response, json: body });
+  });
+  await connect(page);
+  await expect(conversationButton(page, id)).toHaveCount(0);
+  await searchBox(page).fill(title);
+  await conversationButton(page, id).click();
+  await expect(composer(page)).toBeEnabled();
+  await send(page, '新しいメッセージ');
+  await searchBox(page).press('Escape');
+  await expect(firstListed(page)).toHaveAttribute('data-conversation-id', id);
+});
+
+test('a late search answer cannot bring back a conversation deleted elsewhere', async ({ page }) => {
+  const suffix = Date.now().toString(36);
+  const title = `遅い検索${suffix}`;
+  const id = await createTitled(page, title);
+  await connect(page);
+  const { promise: hold, resolve: release } = Promise.withResolvers();
+  const { promise: answered, resolve: markAnswered } = Promise.withResolvers();
+  await page.route(url => searchRequests(url), async route => {
+    const response = await route.fetch();
+    markAnswered();
+    await hold;
+    await route.fulfill({ response });
+  });
+  try {
+    await searchBox(page).fill(title);
+    // The server found it before the delete; the page has not seen the answer yet.
+    await answered;
+    expect((await page.request.delete(`/v1/conversations/${id}`, { headers: auth })).status()).toBe(204);
+    // Opening it from the list finds it gone, while the search answer is still on its way.
+    await conversationButton(page, id).click();
+    await expect(page.locator('#notice')).toHaveText('この会話は削除されています。');
+    release();
+    await expect(page.locator('#conversation-list')).toContainText(`「${title}」に一致する会話はありません`);
+    await expect(conversationButton(page, id)).toHaveCount(0);
+  } finally {
+    release();
+  }
+});
