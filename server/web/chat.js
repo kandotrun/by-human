@@ -332,11 +332,17 @@ function renderStreamingReply() {
   if (nearBottom) area.scrollTop = area.scrollHeight;
 }
 
+// The button keeps its accessible name, so the result is announced by a status
+// outside the log, which re-renders.
 function flashButton(button, label) {
   button.dataset.label ??= button.textContent;
   button.textContent = label;
+  $("copy-status").textContent = label;
   clearTimeout(Number(button.dataset.timer));
-  button.dataset.timer = String(setTimeout(() => { button.textContent = button.dataset.label; }, 1500));
+  button.dataset.timer = String(setTimeout(() => {
+    button.textContent = button.dataset.label;
+    $("copy-status").textContent = "";
+  }, 1500));
 }
 
 async function copyFromLog(event) {

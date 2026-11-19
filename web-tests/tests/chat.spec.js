@@ -915,6 +915,8 @@ test('replies render as Markdown with copy buttons', async ({ page, context }) =
   await expect(guide).toHaveAttribute('href', 'https://example.com/guide');
   await expect(guide).toHaveAttribute('target', '_blank');
   await reply.getByRole('button', { name: 'コードをコピー', exact: true }).click();
+  // The button keeps its name, so a status outside the log announces the result.
+  await expect(page.getByRole('status').filter({ hasText: 'コピーしました' })).toHaveCount(1);
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('const day = 1;');
   await page.getByRole('button', { name: '返信をコピー', exact: true }).last().click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('## 旅の準備\n\n- [x] 予約');
