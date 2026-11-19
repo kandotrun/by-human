@@ -1474,6 +1474,83 @@ async fn hosted_search_progress_without_a_usable_item_id_is_skipped() {
     }
 }
 
+/// Search items that no later request could replay: the Responses input
+/// requires a `web_search_call` ID, bounded here like a call ID.
+fn searches_without_a_usable_id() -> Vec<Value> {
+    let mut missing = web_search("ws_x");
+    missing.as_object_mut().unwrap().remove("id");
+    vec![missing, web_search(""), web_search(&"x".repeat(257))]
+}
+
+#[tokio::test]
+async fn a_streamed_search_without_a_usable_id_is_not_replayed_in_the_next_turn() {
+    let done = |index: usize, item: Value| {
+        frame(json!({"type":"response.output_item.done","output_index":index,"item":item}))
+    };
+    for unusable in searches_without_a_usable_id() {
+        let fixture = Fixture::start(vec![
+            // A stateless plan stream can leave the terminal output empty.
+            vec![
+                done(0, web_search("ws_1")),
+                done(1, unusable),
+                frame(json!({"type":"response.output_text.delta","delta":CITED})),
+                done(2, cited_message(CITED)),
+                complete(vec![]),
+            ],
+            vec![complete(vec![message("ok")])],
+        ])
+        .await;
+        let engine = Engine::new(
+            Arc::new(fixture.provider_with_search(AuthMode::ChatGptPlan, true)),
+            Limits::default(),
+        );
+        let first = engine
+            .run(input(), &Sink::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(first.text, CITED);
+        // The next message replays the first turn's stored items.
+        let next = json!({ "role": "user", "content": "続きを教えて" });
+        let history = [input(), first.new_items, vec![next.clone()]].concat();
+        let second = engine
+            .run(history, &Sink::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(second.text, "ok");
+        let requests = fixture.state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        // Only the unusable search is left out; the rest keeps its order.
+        let expected = vec![
+            input()[0].clone(),
+            web_search("ws_1"),
+            cited_message(CITED),
+            next,
+        ];
+        assert_eq!(requests[1]["input"], json!(expected));
+    }
+}
+
+#[tokio::test]
+async fn a_terminal_search_without_a_usable_id_is_not_kept_for_replay() {
+    for unusable in searches_without_a_usable_id() {
+        let fixture = Fixture::start(vec![vec![
+            frame(json!({"type":"response.output_text.delta","delta":CITED})),
+            complete(vec![web_search("ws_1"), unusable, cited_message(CITED)]),
+        ]])
+        .await;
+        let result = Engine::new(
+            Arc::new(fixture.provider_with_search(AuthMode::ApiKey, true)),
+            Limits::default(),
+        )
+        .run(input(), &Sink::default(), CancellationToken::new())
+        .await
+        .unwrap();
+        assert_eq!(result.text, CITED);
+        // These stored items are what the next turn replays.
+        assert_eq!(result.new_items, [web_search("ws_1"), cited_message(CITED)]);
+    }
+}
+
 #[tokio::test]
 async fn web_search_is_a_hosted_sibling_tool_and_the_instructions_follow_it() {
     for mode in [AuthMode::ApiKey, AuthMode::ChatGptPlan] {

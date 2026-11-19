@@ -327,6 +327,14 @@ impl OpenAIProvider {
                             }
                             output = completed_items.into_values().collect();
                         }
+                        // Later requests replay a search item, and the Responses
+                        // input requires its ID, so one without a usable ID is
+                        // left out (its progress already went unreported).
+                        // Every other item keeps its place.
+                        output.retain(|item| {
+                            item["type"] != "web_search_call"
+                                || hosted_item_id(&item["id"]).is_some()
+                        });
                         return Ok(ModelTurn {
                             output,
                             usage: response.get("usage").filter(|v| !v.is_null()).cloned(),
