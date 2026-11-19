@@ -1215,6 +1215,24 @@ async fn a_source_the_reply_already_links_is_not_listed_again() {
 }
 
 #[tokio::test]
+async fn a_source_whose_address_only_starts_a_linked_address_is_still_listed() {
+    // The reply links longer addresses that merely begin with the cited ones.
+    let text =
+        "[別の記事](https://example.com/newsroom) と https://example.net/live/today を見ました。";
+    let sources = [
+        ("https://example.com/news", Some("News")),
+        ("https://example.net/live", Some("Live")),
+    ];
+    let (result, _) = searched_answer(text, annotated_message(text, &sources)).await;
+    assert_eq!(
+        result.text,
+        format!(
+            "{text}\n\n出典:\n- [News](https://example.com/news)\n- [Live](https://example.net/live)"
+        )
+    );
+}
+
+#[tokio::test]
 async fn a_cited_source_that_is_not_a_web_address_is_never_listed() {
     let text = "公開されました。";
     let script = ("javascript:alert(1)", Some("Example news"));

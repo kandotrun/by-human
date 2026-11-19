@@ -437,7 +437,7 @@ fn unlinked_sources(output: &[Value], text: &str) -> String {
             continue;
         };
         // Each source counts once, where it is first cited.
-        if !seen.insert(url.as_str().to_owned()) || text.contains(cited) {
+        if !seen.insert(url.as_str().to_owned()) || mentions(text, cited) {
             continue;
         }
         let title = citation["title"]
@@ -462,6 +462,17 @@ fn unlinked_sources(output: &[Value], text: &str) -> String {
     } else {
         format!("\n\n出典:{sources}")
     }
+}
+
+/// True when the text contains the whole address, not only the start of a
+/// longer one such as `/newsroom` for `/news`. Doubtful cases count as absent,
+/// so a source is listed twice at worst, never dropped.
+fn mentions(text: &str, url: &str) -> bool {
+    text.match_indices(url).any(|(start, _)| {
+        text[start + url.len()..].chars().next().is_none_or(|next| {
+            !(next.is_ascii_alphanumeric() || "-._~/?#@!$&*+,;=%:".contains(next))
+        })
+    })
 }
 
 /// Backslash-escapes the characters that would end a Markdown link part early.
