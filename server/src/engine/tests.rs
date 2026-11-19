@@ -227,6 +227,23 @@ fn input() -> Vec<Value> {
     vec![json!({ "role": "user", "content": "今の時刻を教えて" })]
 }
 
+/// A completed hosted search, shaped like the Responses `web_search_call` item.
+fn web_search(id: &str) -> Value {
+    json!({ "type": "web_search_call", "id": id, "status": "completed",
+        "action": { "type": "search", "query": "by-human release notes" } })
+}
+
+/// An answer whose citation is both a Markdown link and a `url_citation`.
+fn cited_message(text: &str) -> Value {
+    json!({ "type": "message", "id": "m_cited", "role": "assistant", "status": "completed",
+        "content": [{ "type": "output_text", "text": text, "annotations": [{
+            "type": "url_citation", "start_index": 0, "end_index": text.chars().count(),
+            "url": "https://example.com/news", "title": "Example news"
+        }] }] })
+}
+
+const CITED: &str = "[Example news](https://example.com/news) によると公開されました。";
+
 #[tokio::test]
 async fn empty_terminal_output_keeps_completed_stream_items_and_tool_context() {
     let reasoning = json!({"type":"reasoning","id":"reasoning_1","summary":[],"encrypted_content":"opaque-fixture"});
@@ -1068,4 +1085,107 @@ fn registry_rejects_duplicate_and_invalid_names_without_replacing_tools() {
     }
     assert_eq!(registry.definitions().len(), 1);
     assert_eq!(registry.definitions()[0].name, "get_current_time");
+}
+
+#[tokio::test]
+async fn a_completed_hosted_search_with_an_answer_needs_no_local_tool() {
+    for mode in [AuthMode::ApiKey, AuthMode::ChatGptPlan] {
+        let fixture = Fixture::start(vec![vec![
+            frame(json!({"type":"response.output_text.delta","delta":CITED})),
+            complete(vec![web_search("ws_1"), cited_message(CITED)]),
+        ]])
+        .await;
+        let sink = Sink::default();
+        let result = Engine::new(Arc::new(fixture.provider(mode)), Limits::default())
+            .run(input(), &sink, CancellationToken::new())
+            .await
+            .unwrap();
+        // The text carries the Markdown link, so annotations need no storage.
+        assert_eq!(result.text, CITED);
+        assert_eq!(result.new_items, [web_search("ws_1"), cited_message(CITED)]);
+        assert_eq!(sink.before.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.after.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_hosted_search_before_a_function_call_is_replayed_in_order() {
+    let reasoning =
+        json!({"type":"reasoning","id":"r_1","summary":[],"encrypted_content":"opaque"});
+    let done = |index: usize, item: Value| {
+        frame(json!({"type":"response.output_item.done","output_index":index,"item":item}))
+    };
+    let fixture = Fixture::start(vec![
+        // A stateless plan stream can leave the terminal output empty.
+        vec![
+            done(0, reasoning.clone()),
+            done(1, web_search("ws_1")),
+            done(2, call("clock")),
+            complete(vec![]),
+        ],
+        vec![complete(vec![cited_message(CITED)])],
+    ])
+    .await;
+    let sink = Sink::default();
+    let result = Engine::new(
+        Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
+        Limits::default(),
+    )
+    .run(input(), &sink, CancellationToken::new())
+    .await
+    .unwrap();
+    assert_eq!(result.text, CITED);
+    let requests = fixture.state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    // Stateless requests replay every output item in its original order.
+    let replayed = requests[1]["input"].as_array().unwrap();
+    assert_eq!(replayed.len(), 5);
+    assert_eq!(
+        replayed[..4],
+        [
+            input()[0].clone(),
+            reasoning,
+            web_search("ws_1"),
+            call("clock")
+        ]
+    );
+    assert_eq!(replayed[4]["type"], "function_call_output");
+    assert_eq!(replayed[4]["call_id"], "clock");
+    // The search also stays in the run's canonical items for later turns.
+    assert_eq!(result.new_items[1], web_search("ws_1"));
+    assert_eq!(sink.before.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.after.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn other_hosted_items_and_a_search_without_an_answer_are_refused() {
+    for output in [
+        vec![
+            json!({"type":"file_search_call","id":"fs_1","status":"completed","queries":["x"]}),
+            message("x"),
+        ],
+        vec![
+            json!({"type":"image_generation_call","id":"ig_1","status":"completed","result":""}),
+            message("x"),
+        ],
+        vec![
+            json!({"type":"computer_call","id":"cu_1","call_id":"cu_1","status":"completed",
+                "action":{"type":"screenshot"},"pending_safety_checks":[]}),
+            message("x"),
+        ],
+        vec![web_search("ws_1")],
+    ] {
+        let fixture = Fixture::start(vec![vec![complete(output)]]).await;
+        let sink = Sink::default();
+        let error = Engine::new(
+            Arc::new(fixture.provider(AuthMode::ApiKey)),
+            Limits::default(),
+        )
+        .run(input(), &sink, CancellationToken::new())
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, EngineErrorKind::Protocol);
+        assert_eq!(sink.before.load(Ordering::SeqCst), 0);
+    }
 }
