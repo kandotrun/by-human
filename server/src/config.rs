@@ -13,6 +13,8 @@ pub struct Config {
     /// An HTTPS page origin that proxies to the loopback listener, such as
     /// `https://<machine>.<tailnet>.ts.net` from Tailscale Serve.
     pub public_origin: Option<String>,
+    /// Offer OpenAI's hosted web search to the model.
+    pub web_search: bool,
 }
 
 impl Config {
@@ -25,6 +27,7 @@ impl Config {
             "OPENAI_MODEL",
             "BY_HUMAN_OPENAI_AUTH",
             "BY_HUMAN_PUBLIC_ORIGIN",
+            "BY_HUMAN_WEB_SEARCH",
         ]
         .into_iter()
         .filter_map(|name| {
@@ -95,6 +98,12 @@ impl Config {
                 Some(value.to_owned())
             }
         };
+        // The value is never echoed: a misplaced secret must not reach logs.
+        let web_search = match values.get("BY_HUMAN_WEB_SEARCH").map(String::as_str) {
+            None | Some("" | "on") => true,
+            Some("off") => false,
+            Some(_) => anyhow::bail!("BY_HUMAN_WEB_SEARCH must be on or off"),
+        };
         Ok(Self {
             database_url,
             listen,
@@ -103,6 +112,7 @@ impl Config {
             openai_api_key,
             model,
             public_origin,
+            web_search,
         })
     }
 
@@ -209,6 +219,26 @@ mod tests {
             input.insert("BY_HUMAN_PUBLIC_ORIGIN".into(), invalid.into());
             let error = Config::from_values(&input).err().unwrap().to_string();
             assert!(!error.contains("mac.example"), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn web_search_is_on_unless_explicitly_turned_off() {
+        let mut input = values();
+        assert!(Config::from_values(&input).unwrap().web_search);
+        for (value, enabled) in [("", true), ("on", true), ("off", false)] {
+            input.insert("BY_HUMAN_WEB_SEARCH".into(), value.into());
+            assert_eq!(
+                Config::from_values(&input).unwrap().web_search,
+                enabled,
+                "{value:?}"
+            );
+        }
+        for invalid in ["private-search-setting", "ON", "true", "0", " on"] {
+            input.insert("BY_HUMAN_WEB_SEARCH".into(), invalid.into());
+            let error = Config::from_values(&input).err().unwrap().to_string();
+            assert!(error.contains("BY_HUMAN_WEB_SEARCH"), "{error}");
+            assert!(!error.contains("private-search-setting"), "{error}");
         }
     }
 
