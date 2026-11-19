@@ -382,7 +382,8 @@ fn parse_calls(
             }
             // A hosted web search already ran at OpenAI inside this response.
             // Nothing runs locally, so it needs no intent or receipt. It stays
-            // in the replayed input: stateless requests resend every item.
+            // in the replayed input: stateless requests resend every item
+            // (the provider leaves it out only while search is off).
             Some("reasoning" | "web_search_call") => {}
             // Never silently complete a run containing an unsupported action.
             _ => return Err(protocol_error()),

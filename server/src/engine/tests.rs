@@ -128,8 +128,13 @@ impl Fixture {
     }
 
     fn provider(&self, mode: AuthMode) -> OpenAIProvider {
+        self.provider_with_search(mode, false)
+    }
+
+    fn provider_with_search(&self, mode: AuthMode, web_search: bool) -> OpenAIProvider {
         let mut config = ProviderConfig::new("fixture-model".into(), "fixture-secret".into());
         config.auth_mode = mode;
+        config.web_search = web_search;
         OpenAIProvider::for_loopback_test(config, &self.url).unwrap()
     }
 }
@@ -1129,7 +1134,7 @@ async fn a_hosted_search_before_a_function_call_is_replayed_in_order() {
     .await;
     let sink = Sink::default();
     let result = Engine::new(
-        Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
+        Arc::new(fixture.provider_with_search(AuthMode::ChatGptPlan, true)),
         Limits::default(),
     )
     .run(input(), &sink, CancellationToken::new())
@@ -1156,6 +1161,45 @@ async fn a_hosted_search_before_a_function_call_is_replayed_in_order() {
     assert_eq!(result.new_items[1], web_search("ws_1"));
     assert_eq!(sink.before.load(Ordering::SeqCst), 1);
     assert_eq!(sink.after.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_conversation_that_searched_continues_without_its_searches_once_search_is_off() {
+    // An earlier run searched and answered; this is the next message.
+    let history = vec![
+        input()[0].clone(),
+        web_search("ws_1"),
+        cited_message(CITED),
+        json!({ "role": "user", "content": "続きを教えて" }),
+    ];
+    for mode in [AuthMode::ApiKey, AuthMode::ChatGptPlan] {
+        for enabled in [true, false] {
+            let fixture = Fixture::start(vec![vec![complete(vec![message("ok")])]]).await;
+            let result = Engine::new(
+                Arc::new(fixture.provider_with_search(mode, enabled)),
+                Limits::default(),
+            )
+            .run(history.clone(), &Sink::default(), CancellationToken::new())
+            .await
+            .unwrap();
+            assert_eq!(result.text, "ok");
+            let requests = fixture.state.requests.lock().unwrap();
+            let request = &requests[0];
+            let expected = if enabled {
+                history.clone()
+            } else {
+                // Only the search is left out; the cited reply and order stay.
+                vec![history[0].clone(), history[2].clone(), history[3].clone()]
+            };
+            assert_eq!(request["input"], json!(expected), "{mode:?} {enabled}");
+            let search = json!({"type": "web_search"});
+            assert_eq!(
+                request["tools"].as_array().unwrap().contains(&search),
+                enabled,
+                "{mode:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

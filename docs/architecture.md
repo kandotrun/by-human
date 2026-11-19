@@ -29,10 +29,13 @@ so nothing executes locally: it records no tool intent or receipt and never
 leaves an unknown tool outcome. Stop or a lost stream during a search ends the
 run as cancelled or failed; only a server crash, as for any running model
 request, leaves the run uncertain. Its `web_search_call` items stay in the
-canonical output and are replayed in later requests, as stateless Responses
-requests require. The model cites sources as Markdown links in its text, so
-`url_citation` annotations need no separate storage. Progress uses the same
-`tool.started` and `tool.completed` events as local tools, named `web_search`.
+canonical output. While search is on they are replayed in later requests, as
+stateless Responses requests require. While it is off, requests leave them out:
+a request that replays a search without offering the tool can fail, which would
+stop a conversation that searched before. The model cites sources as Markdown
+links in its text, so `url_citation` annotations need no separate storage.
+Progress uses the same `tool.started` and `tool.completed` events as local
+tools, named `web_search`.
 
 ## State ownership
 

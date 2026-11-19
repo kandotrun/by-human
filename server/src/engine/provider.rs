@@ -157,6 +157,15 @@ impl OpenAIProvider {
     }
 
     fn body(&self, input: &[Value], definitions: &[ToolDefinition]) -> Value {
+        // A request that offers no web search must not replay an earlier one.
+        // The ChatGPT backend has been reported to fail such a response, so a
+        // conversation that searched could never answer again once search is
+        // off (https://github.com/openai/codex/issues/51962). Storage keeps
+        // the items, and the reply text keeps its Markdown links.
+        let input: Vec<&Value> = input
+            .iter()
+            .filter(|item| self.config.web_search || item["type"] != "web_search_call")
+            .collect();
         let functions: Vec<_> = definitions
             .iter()
             .map(|definition| {
