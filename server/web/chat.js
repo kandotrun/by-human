@@ -1,5 +1,7 @@
 // The browser is a client of the durable API. Closing a stream never stops a
 // run, and an unacknowledged submission keeps its original identity.
+import { renderMarkdown } from "/markdown.js";
+
 const $ = (id) => document.getElementById(id);
 const encoder = new TextEncoder();
 const STORAGE_KEY = "by-human-chat-v1";
@@ -200,6 +202,17 @@ function runStatus(run) {
   return "";
 }
 
+// Rendering megabytes of Markdown blocks the page, so a reply longer than this
+// stays one plain text node. Copying always uses the raw text.
+const MARKDOWN_LIMIT = 65_536;
+
+function renderReply(reply, text) {
+  const plain = text.length > MARKDOWN_LIMIT;
+  reply.classList.toggle("markdown", !plain);
+  reply.classList.toggle("plain", plain);
+  reply.replaceChildren(plain ? text : renderMarkdown(text));
+}
+
 function renderMessages(forceScroll = false) {
   const area = $("message-area");
   const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
@@ -213,11 +226,22 @@ function renderMessages(forceScroll = false) {
     user.dataset.role = "user";
     user.dataset.runId = run.id;
     turn.append(user);
-    if (run.output_text) {
-      const assistant = element("div", "message assistant", run.output_text);
+    // An active run always has a reply node, so streamed text updates in place.
+    if (run.output_text || active(run)) {
+      const assistant = element("div", "message assistant");
       assistant.dataset.role = "assistant";
       assistant.dataset.runId = run.id;
+      renderReply(assistant, run.output_text);
       turn.append(assistant);
+      if (!active(run)) {
+        const actions = element("div", "message-actions");
+        const copy = element("button", "message-copy", "コピー");
+        copy.type = "button";
+        copy.dataset.runId = run.id;
+        copy.setAttribute("aria-label", "返信をコピー");
+        actions.append(copy);
+        turn.append(actions);
+      }
     }
     const status = runStatus(run);
     if (status) turn.append(element("div", `message-status${unresolved(run) ? " warning" : ""}`, status));
@@ -285,12 +309,64 @@ function render(forceScroll = false) {
   renderControls();
 }
 
+// Streamed text re-renders only its own reply, at most once per frame, so the
+// rest of the conversation keeps its nodes, selection and scroll position.
+let streamingFrame = 0;
+let streamingRunId = "";
+
+function scheduleStreamingRender(run) {
+  streamingRunId = run.id;
+  if (!streamingFrame) streamingFrame = requestAnimationFrame(renderStreamingReply);
+}
+
+function renderStreamingReply() {
+  streamingFrame = 0;
+  const run = runs.find((item) => item.id === streamingRunId);
+  const reply = run && [...$("chat-log").querySelectorAll('[data-role="assistant"]')].find((node) => node.dataset.runId === run.id);
+  // A stale frame (finished run or another conversation) has nothing to do;
+  // completion and selection changes render the log themselves.
+  if (!reply || !active(run)) return;
+  const area = $("message-area");
+  const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
+  renderReply(reply, run.output_text);
+  if (nearBottom) area.scrollTop = area.scrollHeight;
+}
+
+// The button keeps its accessible name, so the result is announced by a status
+// outside the log, which re-renders.
+function flashButton(button, label) {
+  button.dataset.label ??= button.textContent;
+  button.textContent = label;
+  $("copy-status").textContent = label;
+  clearTimeout(Number(button.dataset.timer));
+  button.dataset.timer = String(setTimeout(() => {
+    button.textContent = button.dataset.label;
+    $("copy-status").textContent = "";
+  }, 1500));
+}
+
+async function copyFromLog(event) {
+  const button = event.target.closest("button.code-copy, button.message-copy");
+  if (!button) return;
+  const text = button.classList.contains("code-copy")
+    ? button.closest(".code-block")?.querySelector("pre > code")?.textContent ?? ""
+    : runs.find((run) => run.id === button.dataset.runId)?.output_text ?? "";
+  try {
+    await navigator.clipboard.writeText(text);
+    flashButton(button, "コピーしました");
+  } catch {
+    flashButton(button, "コピーできませんでした");
+  }
+}
+
 function resizeComposer() {
   $("message").style.height = "auto";
   $("message").style.height = `${$("message").scrollHeight}px`;
 }
 
 function cancelSelection() {
+  if (streamingFrame) cancelAnimationFrame(streamingFrame);
+  streamingFrame = 0;
   selection += 1;
   selectionAbort.abort();
   selectionAbort = new AbortController();
@@ -702,7 +778,7 @@ async function startStream(id, captured) {
           if (active(run)) {
             run.output_text = text;
             progress = "応答中";
-            renderMessages();
+            scheduleStreamingRender(run);
           }
         } else if (record.event === "tool.started") progress = "ツールを実行中";
         else if (record.event === "tool.completed") progress = "応答を準備中";
@@ -892,6 +968,7 @@ $("message").addEventListener("keydown", (event) => {
   }
 });
 $("stop").addEventListener("click", stop);
+$("chat-log").addEventListener("click", copyFromLog);
 $("open-sidebar").addEventListener("click", () => setDrawer(true));
 $("close-sidebar").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });
 $("drawer-backdrop").addEventListener("click", () => { setDrawer(false); $("open-sidebar").focus(); });

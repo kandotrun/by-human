@@ -63,6 +63,10 @@ test('large stored histories open and allow a new message', async ({ page }) => 
   await expect(page.getByText('古い履歴の一部は省略されています。')).toHaveCount(1);
   await expect(userRows(page).first()).not.toHaveText('依頼 1');
   await expect(userRows(page).last()).toHaveText('依頼 9');
+  // Replies this long stay one plain text node instead of rendering Markdown.
+  const plain = await assistantRows(page).evaluateAll(nodes => nodes.map(node =>
+    node.classList.contains('plain') && node.childNodes.length === 1 && node.firstChild.nodeType === Node.TEXT_NODE));
+  expect(plain).toEqual(Array(await userRows(page).count()).fill(true));
   const next = await send(page, 'ここから続けて');
   await expect.poll(async () => (await run(page, next.id)).status).toBe('completed');
   await expect(assistantRows(page).last()).toHaveText('こんにちは。「ここから続けて」を受け取りました。');
@@ -894,4 +898,47 @@ test('a sign-in whose cookie is not kept explains the problem', async ({ page })
   await dialog.getByRole('button', { name: 'ログイン', exact: true }).click();
   await expect(dialog.getByRole('alert')).toHaveText('ログイン状態を保存できませんでした。ブラウザのCookie設定を確認してください。');
   await expect(dialog).toBeVisible();
+});
+
+test('replies render as Markdown with copy buttons', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await connect(page);
+  await newConversation(page);
+  const sent = await send(page, 'Markdownテスト');
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('completed');
+  const reply = assistantRows(page).last();
+  await expect(reply.getByRole('heading', { name: '旅の準備', level: 2 })).toBeVisible();
+  await expect(reply.locator('li.task-item input[type="checkbox"]')).toHaveCount(2);
+  await expect(reply.locator('li.task-item').nth(1).locator('strong')).toHaveText('荷造り');
+  await expect(reply.locator('.code-block[data-language="js"] code')).toHaveText('const day = 1;');
+  const guide = reply.getByRole('link', { name: '案内', exact: true });
+  await expect(guide).toHaveAttribute('href', 'https://example.com/guide');
+  await expect(guide).toHaveAttribute('target', '_blank');
+  await reply.getByRole('button', { name: 'コードをコピー', exact: true }).click();
+  // The button keeps its name, so a status outside the log announces the result.
+  await expect(page.getByRole('status').filter({ hasText: 'コピーしました' })).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('const day = 1;');
+  await page.getByRole('button', { name: '返信をコピー', exact: true }).last().click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('## 旅の準備\n\n- [x] 予約');
+});
+
+test('the first streamed text updates only the reply in progress', async ({ page }) => {
+  await connect(page);
+  await newConversation(page);
+  const first = await send(page, '最初のメッセージ');
+  await expect.poll(async () => (await run(page, first.id)).status).toBe('completed');
+  const { promise: holdEvents, resolve: releaseEvents } = Promise.withResolvers();
+  await page.route('**/v1/runs/*/events', async route => {
+    await holdEvents;
+    await route.continue();
+  });
+  const sent = await send(page, '停止テスト');
+  // The accepted run renders before the stream starts; capture after that.
+  await expect(page.locator(`#chat-log [data-role="user"][data-run-id="${sent.id}"]`)).toBeVisible();
+  const earlier = await userRows(page).first().elementHandle();
+  releaseEvents();
+  await expect(assistantRows(page).last()).toHaveText('停止操作を待っています。');
+  expect(await earlier.evaluate(node => node.isConnected)).toBe(true);
+  await page.getByRole('button', { name: '停止', exact: true }).click();
+  await expect.poll(async () => (await run(page, sent.id)).status).toBe('cancelled');
 });
