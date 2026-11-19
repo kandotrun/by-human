@@ -183,24 +183,11 @@ Details: [MCP tools](docs/mcp.md).
 
 ```mermaid
 flowchart LR
-    subgraph devices["Your devices"]
-        browser["Browser on this computer<br>127.0.0.1:4310"]
-        phone["iPhone<br>Home Screen app"]
-    end
-    subgraph computer["Your computer"]
-        server["by-human<br>HTTP API · chat page · runner"]
-        db[("PostgreSQL<br>conversations · runs<br>events · tool receipts")]
-        login["~/.config/by-human<br>ChatGPT sign-in"]
-    end
-    openai["OpenAI Responses API<br>your ChatGPT plan"]
-    tools["MCP servers you list<br>stdio · Streamable HTTP"]
-
-    browser -->|"server token, then a session cookie"| server
-    phone -->|"HTTPS through Tailscale Serve"| server
-    server <--> db
-    login --- server
-    server -->|"streamed model turns"| openai
-    server -->|"listed tools only"| tools
+    browser["Browser"] --> server
+    phone["iPhone<br>via Tailscale"] --> server
+    server["by-human<br>on your<br>computer"] <--> db[("PostgreSQL<br>conversations<br>and runs")]
+    server --> openai["OpenAI<br>Responses API<br>ChatGPT plan"]
+    server --> tools["MCP servers<br>only the tools<br>you list"]
 ```
 
 Each message you send becomes a **run**. by-human saves the run in PostgreSQL first, then streams the model's reply and calls the tools it asks for.

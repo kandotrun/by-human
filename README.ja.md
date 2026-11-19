@@ -183,24 +183,11 @@ HTTPのサーバーにはHTTPS（ローカルならループバックのHTTP）�
 
 ```mermaid
 flowchart LR
-    subgraph devices["自分の端末"]
-        browser["このコンピューターのブラウザ<br>127.0.0.1:4310"]
-        phone["iPhone<br>ホーム画面のアプリ"]
-    end
-    subgraph computer["自分のコンピューター"]
-        server["by-human<br>HTTP API・チャット画面・ランナー"]
-        db[("PostgreSQL<br>会話・実行<br>イベント・ツールの記録")]
-        login["~/.config/by-human<br>ChatGPTのログイン"]
-    end
-    openai["OpenAI Responses API<br>自分のChatGPTプラン"]
-    tools["指定したMCPサーバー<br>stdio・Streamable HTTP"]
-
-    browser -->|"サーバー用トークン、その後はセッションCookie"| server
-    phone -->|"Tailscale Serve経由のHTTPS"| server
-    server <--> db
-    login --- server
-    server -->|"モデルとのやり取りをストリーミング"| openai
-    server -->|"指定したツールだけ"| tools
+    browser["ブラウザ"] --> server
+    phone["iPhone<br>Tailscale経由"] --> server
+    server["by-human<br>自分の<br>コンピューター"] <--> db[("PostgreSQL<br>会話と実行")]
+    server --> openai["OpenAI<br>Responses API<br>ChatGPTプラン"]
+    server --> tools["MCPサーバー<br>指定した<br>ツールだけ"]
 ```
 
 送ったメッセージは、それぞれ1つの**実行（run）**になります。by-humanは最初に実行をPostgreSQLへ保存し、それからモデルの返信をストリーミングして、モデルが求めたツールを呼び出します。
