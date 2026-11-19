@@ -80,6 +80,52 @@ impl Model for BrowserModel {
             cancel.cancelled().await;
             return Err(EngineError::cancelled());
         }
+        if message == "検索テスト" || message == "検索停止テスト" {
+            // A synthetic hosted search reports progress only, as OpenAI's
+            // web_search_call does. Nothing runs here and nothing is recorded.
+            let search = format!("ws_fixture_{}", Uuid::new_v4().simple());
+            let progress = |started: bool| {
+                let (call_id, name) = (search.clone(), "web_search".to_owned());
+                if started {
+                    RuntimeEvent::HostedToolStarted { call_id, name }
+                } else {
+                    RuntimeEvent::HostedToolCompleted { call_id, name }
+                }
+            };
+            sink.emit(progress(true)).await?;
+            if message == "検索停止テスト" {
+                cancel.cancelled().await;
+                return Err(EngineError::cancelled());
+            }
+            // Each phase lasts long enough for the page to show its label.
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(EngineError::cancelled()),
+                _ = tokio::time::sleep(Duration::from_millis(1500)) => {}
+            }
+            sink.emit(progress(false)).await?;
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(EngineError::cancelled()),
+                _ = tokio::time::sleep(Duration::from_millis(1000)) => {}
+            }
+            let text =
+                "調べました。[公式ニュース](https://example.com/news) によると試験は成功しました。";
+            sink.emit(RuntimeEvent::TextDelta { delta: text.into() })
+                .await?;
+            return Ok(ModelTurn {
+                output: vec![
+                    json!({
+                        "type":"web_search_call", "id":search, "status":"completed",
+                        "action":{"type":"search", "query":"試験の結果"}
+                    }),
+                    json!({
+                        "type":"message", "role":"assistant", "content":[{
+                            "type":"output_text", "text":text
+                        }]
+                    }),
+                ],
+                usage: None,
+            });
+        }
         if message == "Markdownテスト" {
             // A streamed Markdown reply split mid-document, like a real provider.
             let first = "## 旅の準備\n\n- [x] 予約\n- [ ] **荷造り**\n\n```js\nconst ";

@@ -665,6 +665,8 @@ function jumpToLatest() {
 
 function toolLabel(name) {
   if (name === "get_current_time") return "時刻を確認中";
+  // OpenAI's hosted search; its tool.started events carry this name.
+  if (name === "web_search") return "Web を検索中";
   const mcp = /^mcp_(.+)_[0-9a-f]{16}$/.exec(name ?? "");
   return mcp ? `${mcp[1]} のツールを実行中` : "ツールを実行中";
 }
