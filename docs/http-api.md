@@ -76,10 +76,12 @@ cancel execution. Event names include `run.queued`, `run.running`, `model_starte
 `text_delta`, `tool.started`, `tool.completed`, `model.usage` and `run.finished`.
 The `text_delta` payload contains `{"delta":"..."}`. `tool.started` contains
 `{"call_id":"...","name":"..."}` and `tool.completed` contains `{"call_id":"..."}`.
-OpenAI's hosted web search reports the same two events with `name` set to
-`web_search` and its search ID as `call_id`. It runs at OpenAI, so it has no tool
-record in `/review` and cannot leave an unknown tool outcome. Use the settled run
-state after completion rather than treating partial output as a successful reply.
+OpenAI's hosted web search reports the same two events: `tool.started` carries
+`name` set to `web_search` and its search ID as `call_id`, while `tool.completed`
+carries only that `call_id`, so match a completion to its start by `call_id`.
+The search runs at OpenAI, so it has no tool record in `/review` and cannot leave
+an unknown tool outcome. Use the settled run state after completion rather than
+treating partial output as a successful reply.
 Canonical reasoning and tool arguments/results are not chat messages and are
 omitted from public run/history responses.
 
@@ -159,8 +161,9 @@ uncertain. This does not claim exactly-once execution of arbitrary external work
 送信時に作った`idempotency_key`は再試行でも再利用してください。
 同じキーで本文を変更すると`409`になります。
 SSEの接続を閉じても実行は止まりません。停止には`/cancel`を使います。
-OpenAIのWeb検索の進捗は`tool.started`／`tool.completed`（`name`は`web_search`）で
-通知します。検索はOpenAI側で実行されるため、ツールの実行記録は作りません。
+OpenAIのWeb検索の進捗は`tool.started`（`name`は`web_search`）と`tool.completed`で
+通知します。`tool.completed`には`call_id`しか含まれないため、`call_id`で開始と
+対応付けてください。検索はOpenAI側で実行されるため、ツールの実行記録は作りません。
 会話は`PATCH`で名前を変更でき、`DELETE`で完全に削除できます。
 `/v1/conversations/search?q=`はタイトルとメッセージ本文を部分一致で検索します。
 実行中または確認待ちの処理がある会話の削除は`409`になります。
