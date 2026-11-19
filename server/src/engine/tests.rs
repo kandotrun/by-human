@@ -249,6 +249,52 @@ fn cited_message(text: &str) -> Value {
 
 const CITED: &str = "[Example news](https://example.com/news) によると公開されました。";
 
+/// An answer that cites each `(url, title)` source only as a `url_citation`.
+fn annotated_message(text: &str, sources: &[(&str, Option<&str>)]) -> Value {
+    let annotations: Vec<Value> = sources
+        .iter()
+        .map(|(url, title)| {
+            let mut citation = json!({ "type": "url_citation", "start_index": 0,
+                "end_index": text.chars().count(), "url": url });
+            if let Some(title) = title {
+                citation["title"] = json!(title);
+            }
+            citation
+        })
+        .collect();
+    json!({ "type": "message", "id": "m_annotated", "role": "assistant", "status": "completed",
+        "content": [{ "type": "output_text", "text": text, "annotations": annotations }] })
+}
+
+/// Streams `text`, then completes it as a searched `answer`. Returns the
+/// settled result and the text that the deltas carried.
+async fn searched_answer(text: &str, answer: Value) -> (EngineResult, String) {
+    let fixture = Fixture::start(vec![vec![
+        frame(json!({"type":"response.output_text.delta","delta":text})),
+        complete(vec![web_search("ws_1"), answer]),
+    ]])
+    .await;
+    let sink = Sink::default();
+    let result = Engine::new(
+        Arc::new(fixture.provider_with_search(AuthMode::ChatGptPlan, true)),
+        Limits::default(),
+    )
+    .run(input(), &sink, CancellationToken::new())
+    .await
+    .unwrap();
+    let streamed = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    (result, streamed)
+}
+
 #[tokio::test]
 async fn empty_terminal_output_keeps_completed_stream_items_and_tool_context() {
     let reasoning = json!({"type":"reasoning","id":"reasoning_1","summary":[],"encrypted_content":"opaque-fixture"});
@@ -1111,6 +1157,82 @@ async fn a_completed_hosted_search_with_an_answer_needs_no_local_tool() {
         assert_eq!(sink.before.load(Ordering::SeqCst), 0);
         assert_eq!(sink.after.load(Ordering::SeqCst), 0);
         assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_source_cited_only_by_an_annotation_is_listed_after_the_reply() {
+    let text = "公開されました。";
+    let answer = annotated_message(
+        text,
+        &[
+            ("https://example.com/news", Some(r"Example [news] \ wire")),
+            ("https://example.org/report?id=1", None),
+            // A source cited again is listed once, where it first appeared.
+            ("https://example.com/news", Some("Example news")),
+            ("https://example.net/page", Some(" \n ")),
+            ("https://example.com/smile:)", Some("Smile\n\n# (draft)")),
+        ],
+    );
+    let (result, streamed) = searched_answer(text, answer.clone()).await;
+    // The title or, without one, the host labels each link. Neither can
+    // break the link or the list.
+    let listed = [
+        r"- [Example \[news\] \\ wire](https://example.com/news)",
+        "- [example.org](https://example.org/report?id=1)",
+        "- [example.net](https://example.net/page)",
+        r"- [Smile # (draft)](https://example.com/smile:\))",
+    ];
+    assert_eq!(
+        result.text,
+        format!("{text}\n\n出典:\n{}", listed.join("\n"))
+    );
+    // Only the settled text gains the list: the stream and the canonical
+    // items keep what the provider sent.
+    assert_eq!(streamed, text);
+    assert_eq!(result.new_items, [web_search("ws_1"), answer]);
+}
+
+#[tokio::test]
+async fn a_source_the_reply_already_links_is_not_listed_again() {
+    let text = "[Example news](https://example.com/news) と https://example.net/live によると公開されました。";
+    let linked = [
+        ("https://example.com/news", Some("Example news")),
+        ("https://example.net/live", Some("Live")),
+    ];
+    let unlinked = ("https://example.org/report", Some("Report"));
+    for (sources, listed) in [
+        // A reply that links every source it cites is unchanged, byte for byte.
+        (linked.to_vec(), ""),
+        (
+            [&linked[..], &[unlinked]].concat(),
+            "\n\n出典:\n- [Report](https://example.org/report)",
+        ),
+    ] {
+        let (result, _) = searched_answer(text, annotated_message(text, &sources)).await;
+        assert_eq!(result.text, format!("{text}{listed}"));
+    }
+}
+
+#[tokio::test]
+async fn a_cited_source_that_is_not_a_web_address_is_never_listed() {
+    let text = "公開されました。";
+    let script = ("javascript:alert(1)", Some("Example news"));
+    for (sources, listed) in [
+        (vec![script], ""),
+        (
+            vec![
+                script,
+                ("JavaScript://example.com/%0Aalert(1)", Some("Example news")),
+                ("mailto:press@example.com", Some("Press")),
+                ("/news", Some("Relative")),
+                ("https://example.org/report", Some("Report")),
+            ],
+            "\n\n出典:\n- [Report](https://example.org/report)",
+        ),
+    ] {
+        let (result, _) = searched_answer(text, annotated_message(text, &sources)).await;
+        assert_eq!(result.text, format!("{text}{listed}"));
     }
 }
 

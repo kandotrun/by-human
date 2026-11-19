@@ -30,6 +30,8 @@ parses HTML, so HTML in a reply stays text, images appear as links and other
 link schemes as plain text. Each code block and reply has a copy button. Your
 own messages, and replies longer than 65,536 characters, stay plain text.
 When the agent searches the web, the reply cites its sources inline as links.
+A cited source that the reply text does not link is listed under 出典 at the end
+of the reply.
 
 While a reply runs, a status pill under the title shows 考えています, the tool in
 use (時刻を確認中, Web を検索中 while it searches the web, or
@@ -131,6 +133,7 @@ not an independent verification of external effects or a per-tool approval syste
 
 返信は見出し・リスト・表・コードなどのMarkdownで表示し、コードと返信本文はコピーできます。
 Web検索を使った返信は、出典をリンクで示します。
+本文にリンクがない出典は、返信の最後に「出典」としてまとめて示します。
 返信内のHTMLは実行せずに文字として表示し、画像は読み込まずリンクとして表示します。
 65,536文字を超える長い返信は、Markdownにせずそのまま文字で表示します。
 応答中はタイトルの下に「考えています」「時刻を確認中」「Web を検索中」「応答中」などの
