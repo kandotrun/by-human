@@ -1062,8 +1062,9 @@ test('a reload during a web search replays the same label', async ({ page }) => 
 
 test('the web search label survives a reconnect and Stop leaves nothing to review', async ({ page }) => {
   await labelSurvivesReconnect(page, '検索停止テスト', 'Web を検索中', 'cancelled');
-  // A hosted search has no tool record, so the conversation continues.
-  await expect(page.getByRole('button', { name: '実行記録を確認', exact: true })).toHaveCount(0);
+  // A hosted search has no tool record: the stopped reply asks for no review
+  // and the conversation continues.
+  await expect(page.locator('#chat-log .message-status')).toHaveText(['停止しました']);
   await composer(page).fill('続きをどうぞ');
   await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
 });
