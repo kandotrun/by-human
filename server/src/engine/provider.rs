@@ -282,7 +282,7 @@ impl OpenAIProvider {
                             .cloned()
                             .ok_or_else(protocol_error)?;
                         let finished = if item["type"] == "web_search_call" {
-                            searches.complete(&item["id"])?
+                            searches.complete(&item["id"])
                         } else {
                             None
                         };
@@ -292,14 +292,14 @@ impl OpenAIProvider {
                         report(sink, cancel, finished).await?;
                     }
                     "response.output_item.added" if value["item"]["type"] == "web_search_call" => {
-                        report(sink, cancel, searches.start(&value["item"]["id"])?).await?;
+                        report(sink, cancel, searches.start(&value["item"]["id"])).await?;
                     }
                     "response.web_search_call.in_progress"
                     | "response.web_search_call.searching" => {
-                        report(sink, cancel, searches.start(&value["item_id"])?).await?;
+                        report(sink, cancel, searches.start(&value["item_id"])).await?;
                     }
                     "response.web_search_call.completed" => {
-                        report(sink, cancel, searches.complete(&value["item_id"])?).await?;
+                        report(sink, cancel, searches.complete(&value["item_id"])).await?;
                     }
                     "response.output_text.delta" | "response.refusal.delta" => {
                         let delta = value["delta"].as_str().ok_or_else(protocol_error)?;
@@ -361,38 +361,35 @@ struct HostedSearches {
 
 impl HostedSearches {
     /// Report a search once, from whichever stream event shows it first.
-    fn start(&mut self, id: &Value) -> Result<Option<RuntimeEvent>> {
+    fn start(&mut self, id: &Value) -> Option<RuntimeEvent> {
         let id = hosted_item_id(id)?;
-        Ok(self
-            .started
+        self.started
             .insert(id.clone())
             .then(|| RuntimeEvent::HostedToolStarted {
                 call_id: id,
                 name: WEB_SEARCH.into(),
-            }))
+            })
     }
 
     /// End a started search once; its completed event and item both end it.
-    fn complete(&mut self, id: &Value) -> Result<Option<RuntimeEvent>> {
+    fn complete(&mut self, id: &Value) -> Option<RuntimeEvent> {
         let id = hosted_item_id(id)?;
-        Ok(
-            (self.started.contains(&id) && self.completed.insert(id.clone())).then(|| {
-                RuntimeEvent::HostedToolCompleted {
-                    call_id: id,
-                    name: WEB_SEARCH.into(),
-                }
-            }),
-        )
+        (self.started.contains(&id) && self.completed.insert(id.clone())).then(|| {
+            RuntimeEvent::HostedToolCompleted {
+                call_id: id,
+                name: WEB_SEARCH.into(),
+            }
+        })
     }
 }
 
 /// Progress is stored as a run event, so its item ID is bounded like a call ID.
-fn hosted_item_id(value: &Value) -> Result<String> {
+/// Without a usable ID the progress goes unreported; the response continues.
+fn hosted_item_id(value: &Value) -> Option<String> {
     value
         .as_str()
         .filter(|id| !id.is_empty() && id.len() <= 256)
         .map(str::to_owned)
-        .ok_or_else(protocol_error)
 }
 
 async fn report(

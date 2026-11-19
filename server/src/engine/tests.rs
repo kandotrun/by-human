@@ -1442,7 +1442,7 @@ async fn hosted_search_progress_is_reported_once_without_a_tool_intent() {
 }
 
 #[tokio::test]
-async fn hosted_search_progress_needs_a_bounded_item_id() {
+async fn hosted_search_progress_without_a_usable_item_id_is_skipped() {
     for progress in [
         json!({"type":"response.web_search_call.searching","output_index":0}),
         json!({"type":"response.web_search_call.searching","output_index":0,"item_id":""}),
@@ -1450,22 +1450,35 @@ async fn hosted_search_progress_needs_a_bounded_item_id() {
             "item_id":"x".repeat(257)}),
         json!({"type":"response.output_item.added","output_index":0,
             "item":{"type":"web_search_call","status":"in_progress"}}),
+        json!({"type":"response.web_search_call.completed","output_index":0,"item_id":""}),
+        json!({"type":"response.output_item.done","output_index":0,
+            "item":{"type":"web_search_call","status":"completed"}}),
     ] {
         let fixture = Fixture::start(vec![vec![
             frame(progress),
+            frame(json!({"type":"response.output_text.delta","delta":CITED})),
             complete(vec![web_search("ws_1"), cited_message(CITED)]),
         ]])
         .await;
         let sink = Sink::default();
-        let error = Engine::new(
+        // Only the progress is lost: the stream goes on and the reply completes.
+        let result = Engine::new(
             Arc::new(fixture.provider(AuthMode::ChatGptPlan)),
             Limits::default(),
         )
         .run(input(), &sink, CancellationToken::new())
         .await
-        .unwrap_err();
-        assert_eq!(error.kind, EngineErrorKind::Protocol);
-        assert!(!search_started(&sink));
+        .unwrap();
+        assert_eq!(result.text, CITED);
+        assert_eq!(
+            *sink.events.lock().unwrap(),
+            [
+                RuntimeEvent::ModelStarted { request: 1 },
+                RuntimeEvent::TextDelta {
+                    delta: CITED.into()
+                },
+            ]
+        );
     }
 }
 
